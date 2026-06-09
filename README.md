@@ -12,6 +12,11 @@ on the Auvidea **J106 (+ M110)** carrier.
 > is in
 > [`tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi`](tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi).
 
+> **New board / just flashed?** First complete NVIDIA's headless first-boot (oem-config) over
+> the micro-USB serial — see
+> [`headless-first-boot-setup.md`](headless-first-boot-setup.md). You need a login before any
+> of the DTB work below.
+
 ---
 
 ## 1. Inventory of the supplied material
