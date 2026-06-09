@@ -1,0 +1,574 @@
+/*
+ * tegra186-camera-j106-imx219.dtsi
+ *
+ * Auvidea J106 carrier + Jetson TX2 : 6x Sony IMX219 (Raspberry Pi v2) CSI-2 cameras.
+ *
+ * Derived from the working TX1 device tree (L4T R24.2.1, tegra210-imx219.dts) and
+ * ported to the L4T R32.2.1 "tegracam" binding using NVIDIA's
+ * tegra186-camera-imx274-dual.dtsi as the structural template.
+ *
+ * The IMX219 driver (compatible "nvidia,imx219") already ships in the R32 kernel, so
+ * no driver patch is required - this device tree is the only addition needed.
+ *
+ * ============================ HARDWARE (J106 carrier) ============================
+ * 6 cameras across 3 i2c buses, 2 per bus. The J106 i2c address shifter (default
+ * shift = 2) puts the 2nd ("south") camera of each bus at 0x12 instead of 0x10.
+ * All 6 reset lines are tied together and driven by ONE GPIO.
+ *
+ *  Cam  CSI  serial    i2c bus (TX2)        Linux bus  addr   J106 connector
+ *  ---  ---  --------  -------------------  ---------  -----  --------------
+ *   A    0   serial_a  gen2_i2c @c240000    i2c-1      0x10   CSI-A (0-N)
+ *   B    1   serial_b  gen2_i2c @c240000    i2c-1      0x12   CSI-B (0-S, shifted)
+ *   C    2   serial_c  cam_i2c  @3180000    i2c-2      0x10   CSI-C (6-N)
+ *   D    3   serial_d  cam_i2c  @3180000    i2c-2      0x12   CSI-D (6-S, shifted)
+ *   E    4   serial_e  gen8_i2c @c250000    i2c-7      0x10   CSI-E (2-N)
+ *   F    5   serial_f  gen8_i2c @c250000    i2c-7      0x12   CSI-F (2-S, shifted)
+ *
+ * ============================ VERIFIED FROM WEB RESEARCH ========================
+ * The two previously-open values are now resolved from working J106+TX2 reports:
+ *
+ *  - Shared camera RESET GPIO = TEGRA_MAIN_GPIO(R, 5), driven via a gpio-hog
+ *    (output-high) on gpio@2200000, and referenced ACTIVE_LOW by each sensor.
+ *    Source: working IMX219-on-J106-CSI-E thread (NVIDIA forums 122966) and the
+ *    Auvidea J106/TX2 firmware (sysfs gpio 461 on R28 == same physical pin).
+ *  - CSI-E confirmed enumerating as "imx219 7-0010" on i2c@c250000 (same thread).
+ *  - CSI-A/B on i2c@c240000 per Auvidea's tegra186-camera-imx219-rr.dtsi.
+ *
+ * ===================== LIVE HARDWARE VERIFIED (2026-06-08) ======================
+ * Probed the actual TX2 (L4T R32.7.6, kernel 4.9.337). After releasing the reset:
+ *   - RESET GPIO = sysfs 461 = TEGRA_MAIN_GPIO(R, 5) (chip base 320 + 141). Driving
+ *     it 0->1 (active-low release) made the sensors ACK. => reset value CONFIRMED.
+ *   - i2c@3180000 (i2c-2):  0x10 + 0x12 ACK  => CSI-C/D bus CONFIRMED.
+ *   - i2c@c250000 (i2c-7):  0x10 + 0x12 ACK  => CSI-E/F bus CONFIRMED.
+ *   - i2c@c240000 (i2c-1):  0x10 ACK (5th cam added) => CSI-A/B bus CONFIRMED.
+ * NOTE: build the DTB against R32.7.x sources (board runs 4.6.x, not the BSP's 4.2.2).
+ *
+ * Still recommended: when the 6th camera is added it will appear at 0x12 on i2c-1.
+ * Cross-check against Auvidea's tegra186-camera-imx219-rr.dtsi if any port misbehaves.
+ * Camera power: RPi modules are powered directly on the J106; the avdd/iovdd/dvdd
+ * string props below are nominal - wire to real supplies only if your build needs it.
+ * ===============================================================================
+ */
+
+#include <dt-bindings/clock/tegra186-clock.h>
+#include <dt-bindings/gpio/tegra186-gpio.h>
+#include <dt-bindings/gpio/gpio.h>
+
+/* All 6 connectors share one reset line on the J106, driven by ONE GPIO.
+ * VERIFIED: TEGRA_MAIN_GPIO(R, 5) on TX2 (NVIDIA forum 122966, Auvidea firmware). */
+#define J106_CAM_RST	TEGRA_MAIN_GPIO(R, 5)
+
+/* Reusable per-mode property block for a 2-lane IMX219 on a given serial interface.
+ * Two modes are scaffolded (full-res + 1080p). The R32 imx219 driver also supports
+ * 3264x1848@28, 1280x720@60 and 1280x720@120 - add more mode nodes as needed. */
+#define IMX219_MODE0(_iface)							\
+	mclk_khz = "24000";							\
+	num_lanes = "2";							\
+	tegra_sinterface = _iface;						\
+	phy_mode = "DPHY";							\
+	discontinuous_clk = "yes";						\
+	dpcm_enable = "false";							\
+	cil_settletime = "0";							\
+	active_w = "3264";							\
+	active_h = "2464";							\
+	mode_type = "bayer";							\
+	pixel_phase = "rggb";							\
+	csi_pixel_bit_depth = "10";						\
+	readout_orientation = "0";						\
+	line_length = "3448";							\
+	inherent_gain = "1";							\
+	mclk_multiplier = "9.33";						\
+	pix_clk_hz = "182400000";						\
+	gain_factor = "1000000";						\
+	min_gain_val = "1000000";						\
+	max_gain_val = "16000000";						\
+	step_gain_val = "1";							\
+	default_gain = "1000000";						\
+	min_hdr_ratio = "1";							\
+	max_hdr_ratio = "1";							\
+	framerate_factor = "1000000";						\
+	min_framerate = "2000000";						\
+	max_framerate = "21000000";						\
+	step_framerate = "1";							\
+	default_framerate = "21000000";						\
+	exposure_factor = "1000000";						\
+	min_exp_time = "13";							\
+	max_exp_time = "683709";						\
+	step_exp_time = "1";							\
+	default_exp_time = "33334";						\
+	embedded_metadata_height = "0";
+
+#define IMX219_MODE1(_iface)							\
+	mclk_khz = "24000";							\
+	num_lanes = "2";							\
+	tegra_sinterface = _iface;						\
+	phy_mode = "DPHY";							\
+	discontinuous_clk = "yes";						\
+	dpcm_enable = "false";							\
+	cil_settletime = "0";							\
+	active_w = "1920";							\
+	active_h = "1080";							\
+	mode_type = "bayer";							\
+	pixel_phase = "rggb";							\
+	csi_pixel_bit_depth = "10";						\
+	readout_orientation = "0";						\
+	line_length = "3448";							\
+	inherent_gain = "1";							\
+	mclk_multiplier = "9.33";						\
+	pix_clk_hz = "182400000";						\
+	gain_factor = "1000000";						\
+	min_gain_val = "1000000";						\
+	max_gain_val = "16000000";						\
+	step_gain_val = "1";							\
+	default_gain = "1000000";						\
+	min_hdr_ratio = "1";							\
+	max_hdr_ratio = "1";							\
+	framerate_factor = "1000000";						\
+	min_framerate = "2000000";						\
+	max_framerate = "30000000";						\
+	step_framerate = "1";							\
+	default_framerate = "30000000";						\
+	exposure_factor = "1000000";						\
+	min_exp_time = "13";							\
+	max_exp_time = "683709";						\
+	step_exp_time = "1";							\
+	default_exp_time = "33334";						\
+	embedded_metadata_height = "0";
+
+/* Common hw-resource block placed in every sensor node. */
+#define IMX219_HW_RESOURCES							\
+	compatible = "nvidia,imx219";						\
+	devnode = "video0";							\
+	physical_w = "3.680";							\
+	physical_h = "2.760";							\
+	sensor_model = "imx219";						\
+	use_sensor_mode_id = "true";						\
+	clocks = <&tegra_car TEGRA186_CLK_EXTPERIPH1>,				\
+		 <&tegra_car TEGRA186_CLK_PLLP_OUT0>;				\
+	clock-names = "extperiph1", "pllp_grtba";				\
+	mclk = "extperiph1";							\
+	clock-frequency = <24000000>;						\
+	reset-gpios = <&tegra_main_gpio J106_CAM_RST GPIO_ACTIVE_LOW>;	\
+	avdd-reg = "vana";							\
+	iovdd-reg = "vif";							\
+	dvdd-reg = "vdig";
+
+/ {
+	/* Release the shared camera reset at boot by hogging the line high.
+	 * All 6 J106 CSI reset pins are tied together on this one GPIO. */
+	gpio@2200000 {
+		camera-control-output-high {
+			gpio-hog;
+			output-high;
+			gpios = <J106_CAM_RST 0>;
+			label = "cam-rst";
+		};
+	};
+};
+
+/ {
+	host1x {
+		/* -------- Video Input: 6 channels (CSI A..F) -------- */
+		vi@15700000 {
+			num-channels = <6>;
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 {
+					reg = <0>;
+					j106_vi_in0: endpoint {
+						port-index = <0>;	/* CSI_A */
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_out0>;
+					};
+				};
+				port@1 {
+					reg = <1>;
+					j106_vi_in1: endpoint {
+						port-index = <1>;	/* CSI_B */
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_out1>;
+					};
+				};
+				port@2 {
+					reg = <2>;
+					j106_vi_in2: endpoint {
+						port-index = <2>;	/* CSI_C */
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_out2>;
+					};
+				};
+				port@3 {
+					reg = <3>;
+					j106_vi_in3: endpoint {
+						port-index = <3>;	/* CSI_D */
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_out3>;
+					};
+				};
+				port@4 {
+					reg = <4>;
+					j106_vi_in4: endpoint {
+						port-index = <4>;	/* CSI_E */
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_out4>;
+					};
+				};
+				port@5 {
+					reg = <5>;
+					j106_vi_in5: endpoint {
+						port-index = <5>;	/* CSI_F */
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_out5>;
+					};
+				};
+			};
+		};
+
+		/* -------- NVCSI: 6 channels -------- */
+		nvcsi@150c0000 {
+			num-channels = <6>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			channel@0 {
+				reg = <0>;
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					port@0 {
+						reg = <0>;
+						j106_csi_in0: endpoint@0 {
+							port-index = <0>;
+							bus-width = <2>;
+							remote-endpoint = <&j106_imx219_out0>;
+						};
+					};
+					port@1 {
+						reg = <1>;
+						j106_csi_out0: endpoint@1 {
+							remote-endpoint = <&j106_vi_in0>;
+						};
+					};
+				};
+			};
+			channel@1 {
+				reg = <1>;
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					port@0 {
+						reg = <0>;
+						j106_csi_in1: endpoint@2 {
+							port-index = <1>;
+							bus-width = <2>;
+							remote-endpoint = <&j106_imx219_out1>;
+						};
+					};
+					port@1 {
+						reg = <1>;
+						j106_csi_out1: endpoint@3 {
+							remote-endpoint = <&j106_vi_in1>;
+						};
+					};
+				};
+			};
+			channel@2 {
+				reg = <2>;
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					port@0 {
+						reg = <0>;
+						j106_csi_in2: endpoint@4 {
+							port-index = <2>;
+							bus-width = <2>;
+							remote-endpoint = <&j106_imx219_out2>;
+						};
+					};
+					port@1 {
+						reg = <1>;
+						j106_csi_out2: endpoint@5 {
+							remote-endpoint = <&j106_vi_in2>;
+						};
+					};
+				};
+			};
+			channel@3 {
+				reg = <3>;
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					port@0 {
+						reg = <0>;
+						j106_csi_in3: endpoint@6 {
+							port-index = <3>;
+							bus-width = <2>;
+							remote-endpoint = <&j106_imx219_out3>;
+						};
+					};
+					port@1 {
+						reg = <1>;
+						j106_csi_out3: endpoint@7 {
+							remote-endpoint = <&j106_vi_in3>;
+						};
+					};
+				};
+			};
+			channel@4 {
+				reg = <4>;
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					port@0 {
+						reg = <0>;
+						j106_csi_in4: endpoint@8 {
+							port-index = <4>;
+							bus-width = <2>;
+							remote-endpoint = <&j106_imx219_out4>;
+						};
+					};
+					port@1 {
+						reg = <1>;
+						j106_csi_out4: endpoint@9 {
+							remote-endpoint = <&j106_vi_in4>;
+						};
+					};
+				};
+			};
+			channel@5 {
+				reg = <5>;
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					port@0 {
+						reg = <0>;
+						j106_csi_in5: endpoint@10 {
+							port-index = <5>;
+							bus-width = <2>;
+							remote-endpoint = <&j106_imx219_out5>;
+						};
+					};
+					port@1 {
+						reg = <1>;
+						j106_csi_out5: endpoint@11 {
+							remote-endpoint = <&j106_vi_in5>;
+						};
+					};
+				};
+			};
+		};
+	};
+
+	/* ================= i2c bus gen2_i2c (CSI-A / CSI-B) -> i2c-1 ================= */
+	i2c@c240000 {
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		imx219_a@10 {
+			IMX219_HW_RESOURCES
+			reg = <0x10>;
+			mode0 { IMX219_MODE0("serial_a") };
+			mode1 { IMX219_MODE1("serial_a") };
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 {
+					reg = <0>;
+					j106_imx219_out0: endpoint {
+						port-index = <0>;
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_in0>;
+					};
+				};
+			};
+		};
+
+		imx219_b@12 {
+			IMX219_HW_RESOURCES
+			reg = <0x12>;
+			mode0 { IMX219_MODE0("serial_b") };
+			mode1 { IMX219_MODE1("serial_b") };
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 {
+					reg = <0>;
+					j106_imx219_out1: endpoint {
+						port-index = <1>;
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_in1>;
+					};
+				};
+			};
+		};
+	};
+
+	/* ================= i2c bus cam_i2c (CSI-C / CSI-D) ================= */
+	i2c@3180000 {
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		imx219_c@10 {
+			IMX219_HW_RESOURCES
+			reg = <0x10>;
+			mode0 { IMX219_MODE0("serial_c") };
+			mode1 { IMX219_MODE1("serial_c") };
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 {
+					reg = <0>;
+					j106_imx219_out2: endpoint {
+						port-index = <2>;
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_in2>;
+					};
+				};
+			};
+		};
+
+		imx219_d@12 {
+			IMX219_HW_RESOURCES
+			reg = <0x12>;
+			mode0 { IMX219_MODE0("serial_d") };
+			mode1 { IMX219_MODE1("serial_d") };
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 {
+					reg = <0>;
+					j106_imx219_out3: endpoint {
+						port-index = <3>;
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_in3>;
+					};
+				};
+			};
+		};
+	};
+
+	/* ============ i2c bus gen8_i2c (CSI-E / CSI-F) -> i2c-7 (CONFIRMED) ============ */
+	i2c@c250000 {
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		imx219_e@10 {
+			IMX219_HW_RESOURCES
+			reg = <0x10>;
+			mode0 { IMX219_MODE0("serial_e") };
+			mode1 { IMX219_MODE1("serial_e") };
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 {
+					reg = <0>;
+					j106_imx219_out4: endpoint {
+						port-index = <4>;
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_in4>;
+					};
+				};
+			};
+		};
+
+		imx219_f@12 {
+			IMX219_HW_RESOURCES
+			reg = <0x12>;
+			mode0 { IMX219_MODE0("serial_f") };
+			mode1 { IMX219_MODE1("serial_f") };
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 {
+					reg = <0>;
+					j106_imx219_out5: endpoint {
+						port-index = <5>;
+						bus-width = <2>;
+						remote-endpoint = <&j106_csi_in5>;
+					};
+				};
+			};
+		};
+	};
+
+	/* ===================== tegra-camera-platform ===================== */
+	tegra-camera-platform {
+		compatible = "nvidia, tegra-camera-platform";
+
+		/* 6 cameras x 2 lanes = 12 lanes total */
+		num_csi_lanes = <12>;
+		max_lane_speed = <1500000>;
+		min_bits_per_pixel = <10>;
+		vi_peak_byte_per_pixel = <2>;
+		vi_bw_margin_pct = <25>;
+		max_pixel_rate = <240000>;
+		isp_peak_byte_per_pixel = <5>;
+		isp_bw_margin_pct = <25>;
+
+		modules {
+			module0 {
+				badge = "j106_csi_a_imx219";
+				position = "rear";
+				orientation = "1";
+				drivernode0 {
+					pcl_id = "v4l2_sensor";
+					devname = "imx219 1-0010";
+					proc-device-tree = "/proc/device-tree/i2c@c240000/imx219_a@10";
+				};
+			};
+			module1 {
+				badge = "j106_csi_b_imx219";
+				position = "rear";
+				orientation = "1";
+				drivernode0 {
+					pcl_id = "v4l2_sensor";
+					devname = "imx219 1-0012";
+					proc-device-tree = "/proc/device-tree/i2c@c240000/imx219_b@12";
+				};
+			};
+			module2 {
+				badge = "j106_csi_c_imx219";
+				position = "rear";
+				orientation = "1";
+				drivernode0 {
+					pcl_id = "v4l2_sensor";
+					devname = "imx219 2-0010";
+					proc-device-tree = "/proc/device-tree/i2c@3180000/imx219_c@10";
+				};
+			};
+			module3 {
+				badge = "j106_csi_d_imx219";
+				position = "rear";
+				orientation = "1";
+				drivernode0 {
+					pcl_id = "v4l2_sensor";
+					devname = "imx219 2-0012";
+					proc-device-tree = "/proc/device-tree/i2c@3180000/imx219_d@12";
+				};
+			};
+			module4 {
+				badge = "j106_csi_e_imx219";
+				position = "rear";
+				orientation = "1";
+				drivernode0 {
+					pcl_id = "v4l2_sensor";
+					devname = "imx219 7-0010";
+					proc-device-tree = "/proc/device-tree/i2c@c250000/imx219_e@10";
+				};
+			};
+			module5 {
+				badge = "j106_csi_f_imx219";
+				position = "rear";
+				orientation = "1";
+				drivernode0 {
+					pcl_id = "v4l2_sensor";
+					devname = "imx219 7-0012";
+					proc-device-tree = "/proc/device-tree/i2c@c250000/imx219_f@12";
+				};
+			};
+		};
+	};
+};

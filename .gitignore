@@ -1,0 +1,22 @@
+# Large archive/tar files
+*.tar.gz
+*.tar.bz2
+*.tbz2
+*.tgz
+*.zip
+*.7z
+*.rar
+
+# Extracted BSP and SDK directories (large, can be re-extracted from public sources)
+bsp_L4T_24_2_1_V2.2/
+J90_v2.2_4.2.2/
+
+# Binary/image files
+*.img
+*.bin
+*.raw
+*.dtb
+Image
+
+# Claude settings
+.claude/
