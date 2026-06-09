@@ -148,20 +148,60 @@
 	clock-names = "extperiph1", "pllp_grtba";				\
 	mclk = "extperiph1";							\
 	clock-frequency = <24000000>;						\
-	reset-gpios = <&tegra_main_gpio J106_CAM_RST GPIO_ACTIVE_LOW>;	\
 	avdd-reg = "vana";							\
 	iovdd-reg = "vif";							\
-	dvdd-reg = "vdig";
+	dvdd-reg = "vdig";						\
+	vana-supply = <&cam_dummy_reg>;					\
+	vif-supply = <&cam_dummy_reg>;					\
+	vdig-supply = <&cam_dummy_reg>;
+
+/*
+ * The imx219 driver REQUIRES a reset-gpios entry and calls gpio_request() on it
+ * EXCLUSIVELY (one consumer per pin). On the J106 all 6 sensors physically share
+ * ONE reset line (TEGRA_MAIN_GPIO(R,5)=141), so they cannot all request it. The
+ * real shared reset is instead held released by the gpio-hog below, and each
+ * sensor is given its own UNIQUE, otherwise-unused main-GPIO pin here purely to
+ * satisfy the driver's mandatory exclusive gpio_request(); toggling these dummy
+ * pins is a harmless no-op (they are gpio-mode and unconnected on the J106 - the
+ * carrier ties ALL camera resets to the single line 141 only). The pins below are
+ * confirmed REQUESTABLE (gpio-mode, free) on the live board via sysfs export;
+ * note that many main-GPIO pins are special-function (SFIO) and would fail
+ * gpio_request() with -EBUSY, so the specific pins matter.
+ */
+#define IMX219_DUMMY_RST(_pin)							\
+	reset-gpios = <&tegra_main_gpio _pin GPIO_ACTIVE_LOW>;
+
+/ {
+	/* Camera power on the J106: the Raspberry Pi IMX219 modules are powered
+	 * directly from the carrier's CSI connectors (onboard LDOs), so there is
+	 * no SoC-controllable rail. Provide one always-on dummy regulator to
+	 * satisfy the imx219 driver's vana/vif/vdig regulator_get calls. */
+	cam_dummy_reg: regulator@200 {
+		compatible = "regulator-fixed";
+		reg = <0x200>;
+		regulator-name = "cam-dummy-reg";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+};
 
 / {
 	/* Release the shared camera reset at boot by hogging the line high.
-	 * All 6 J106 CSI reset pins are tied together on this one GPIO. */
+	 * All 6 J106 CSI reset pins are tied together on this one GPIO.
+	 * NOTE: the stock devkit DTB already defines a (disabled) hog node named
+	 * "camera-control-output-high" on this very pin; we MUST use a distinct
+	 * node name with explicit status="okay" so ours is not silently merged
+	 * into the disabled stock node and is the one that actually claims and
+	 * drives the line high (reset released for all sensors). */
 	gpio@2200000 {
-		camera-control-output-high {
+		j106-camera-reset-release {
 			gpio-hog;
 			output-high;
 			gpios = <J106_CAM_RST 0>;
-			label = "cam-rst";
+			label = "j106-cam-rst";
+			status = "okay";
 		};
 	};
 };
@@ -367,6 +407,7 @@
 
 		imx219_a@10 {
 			IMX219_HW_RESOURCES
+			IMX219_DUMMY_RST(138)
 			reg = <0x10>;
 			mode0 { IMX219_MODE0("serial_a") };
 			mode1 { IMX219_MODE1("serial_a") };
@@ -386,6 +427,7 @@
 
 		imx219_b@12 {
 			IMX219_HW_RESOURCES
+			IMX219_DUMMY_RST(139)
 			reg = <0x12>;
 			mode0 { IMX219_MODE0("serial_b") };
 			mode1 { IMX219_MODE1("serial_b") };
@@ -412,6 +454,7 @@
 
 		imx219_c@10 {
 			IMX219_HW_RESOURCES
+			IMX219_DUMMY_RST(140)
 			reg = <0x10>;
 			mode0 { IMX219_MODE0("serial_c") };
 			mode1 { IMX219_MODE1("serial_c") };
@@ -431,6 +474,7 @@
 
 		imx219_d@12 {
 			IMX219_HW_RESOURCES
+			IMX219_DUMMY_RST(95)
 			reg = <0x12>;
 			mode0 { IMX219_MODE0("serial_d") };
 			mode1 { IMX219_MODE1("serial_d") };
@@ -457,6 +501,7 @@
 
 		imx219_e@10 {
 			IMX219_HW_RESOURCES
+			IMX219_DUMMY_RST(96)
 			reg = <0x10>;
 			mode0 { IMX219_MODE0("serial_e") };
 			mode1 { IMX219_MODE1("serial_e") };
@@ -476,6 +521,7 @@
 
 		imx219_f@12 {
 			IMX219_HW_RESOURCES
+			IMX219_DUMMY_RST(97)
 			reg = <0x12>;
 			mode0 { IMX219_MODE0("serial_f") };
 			mode1 { IMX219_MODE1("serial_f") };

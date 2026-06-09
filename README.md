@@ -6,10 +6,12 @@ on the Auvidea **J106 (+ M110)** carrier.
 
 > TL;DR: On TX1 it works because Auvidea patched the kernel (IMX219 driver) and shipped a
 > custom device tree wiring all 6 cameras across 3 i2c buses. On TX2 the **IMX219 driver
-> already exists** in the L4T R32 kernel, so the port is essentially a **device‑tree job**.
-> The board already runs **L4T R32.7.6** — we **stay on it** and build a single carrier DTB
-> that fixes **cameras + USB** together (WiFi/Ethernet already work). The starting device tree
-> is in
+> already exists** in the L4T R32 kernel, so the bulk of the port is a **device‑tree job** —
+> **plus one small driver patch** ([`patches/0001-imx219-share-reset-gpio-j106.patch`](patches/0001-imx219-share-reset-gpio-j106.patch))
+> so the 6 sensors can share the J106's single hardware reset line (see §7). The board already
+> runs **L4T R32.7.6** — we **stay on it** and build a single carrier DTB that fixes
+> **cameras + USB** together (WiFi/Ethernet already work). **USB is already fixed & verified**
+> (§7.1). The starting device tree is in
 > [`tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi`](tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi).
 
 > **New board / just flashed?** First complete NVIDIA's headless first-boot (oem-config) over
@@ -288,9 +290,15 @@ flash, on top of the **already-installed R32.7.6**. No OS downgrade. WiFi/Ethern
   Filesystem*; unpack `Linux_for_Tegra/`.
 - Download the matching **`public_sources` (kernel + DT)** for R32.7.x — needed to build DTBs.
 
-### 5.2 Kernel / driver (no patch needed)
-- The IMX219 driver already ships in R32 (`drivers/media/i2c/imx219.c`). Just confirm
-  `CONFIG_VIDEO_IMX219=y` (or `=m`) in the tegra defconfig. No kernel source patch (unlike TX1).
+### 5.2 Kernel / driver — ⚠️ a small driver patch IS needed (see §7)
+- The IMX219 driver already ships in R32 (`drivers/media/i2c/imx219.c`), `CONFIG_VIDEO_IMX219=y`.
+- **However** the modern *tegracam* `imx219` driver makes `reset-gpios` **mandatory** and calls
+  `gpio_request()` on it **exclusively** (one consumer per pin). The J106 ties **all 6** camera
+  resets to **one** line, so the 6 sensors cannot all request it — only the first probes, the
+  rest fail with `-EBUSY/-16`. This was discovered on the live board (see §7) and is the reason
+  a tiny **kernel driver patch** ([`patches/0001-imx219-share-reset-gpio-j106.patch`](patches/0001-imx219-share-reset-gpio-j106.patch))
+  is required — exactly the kind of IMX219 patch Auvidea/RidgeRun apply for TX2. So this is **not**
+  a pure device-tree job after all.
 
 ### 5.3 Camera device tree
 - Copy
@@ -355,3 +363,84 @@ sudo ethtool eth0 | grep -E "Speed|Link"
 - `port-index` on tegra186 NVCSI maps CSI bricks A–F → 0–5; for 2‑lane sensors each brick is
   used individually (0,1,2,3,4,5), unlike 4‑lane which uses 0,2,4.
 - Mixed tegra186/tegra194 DTBs in J90 confirm it is L4T R32.x (also supports Xavier).
+
+---
+
+## 7. Bring‑up progress & current plan (2026‑06‑09)
+
+Live work on the actual TX2 (over `ssh`, DTBs built on WSL with `dtc`, deployed via a
+**reversible** `extlinux` `FDT` line with a backup — partition DTB never touched).
+
+### 7.1 USB — ✅ DONE & VERIFIED
+The §3c/§5.4 VBUS fix is implemented and deployed. The carrier DTB deletes the `gpio`
+property from the devkit VBUS regulator (`fixed-regulators/regulator@17`) and forces it
+`regulator-always-on` / `regulator-boot-on`, replacing the absent `pca953x` expander path.
+Result: `-517` defer gone, `xhci@3530000` registers, **two USB root hubs enumerate**. Survives
+reboots (incl. crash‑recovery). Deployed as `/boot/tegra186-j106.dtb`, `extlinux` `DEFAULT j106usb`.
+
+### 7.2 Cameras — IN PROGRESS (driver patch built, not yet deployed)
+What works now:
+- **Reset gpio request solved.** A uniquely‑named gpio‑hog `j106-camera-reset-release`
+  (`status="okay"`) claims and releases the shared reset (gpio 461). Verified live:
+  `gpio-461 … j106-camera-reset-re out hi`. (A same‑named node silently merges into the stock
+  devkit's *disabled* `camera-control-output-high` hog — hence the rename.)
+- With per‑sensor **dummy** reset pins + an always‑on **dummy regulator** (`cam_dummy_reg`),
+  the driver now loads `tegracam … imx219_v2.0.6` and `i2cdetect` shows **`UU` at 0x10/0x12 on
+  all 3 buses** (all 6 sensors bound).
+
+The wall:
+- Sensors then read **`invalid sensor model id: 00`** (and `-121` NACK on the shifted `0x12`).
+  Root cause: the requestable dummy pins live in the camera‑control region and are **physically
+  connected** on the J106, so driving them (the driver's reset assert) **disturbs the cameras**;
+  the truly‑unconnected pins are SFIO and fail `gpio_request()`. A genuine catch‑22.
+  *(Danger noted: exporting AON gpios 256–275 crash‑reboots the board — do not poke them.)*
+
+### 7.3 Why TX1 works and what fixes TX2 (root‑cause, confirmed)
+- The **J106 technical reference** confirms: **pin 6 (CAM‑RST, active‑low) of all 6 CSI
+  connectors are tied together** and driven by **one** GPIO (TX1 `H8`=gpio 148; TX2=gpio 461),
+  toggled **once** (high→low→high). **Pin 5 (`CAM0_MCLK`) is likewise one shared 24 MHz clock.**
+  So the carrier is a **single shared reset + single shared mclk, triggered once** design — **not**
+  per‑sensor.
+- TX1 worked because the **R24.2.1** IMX219 driver did **not** exclusively request a per‑sensor
+  reset (it was toggled externally). The modern **R32 tegracam** driver's mandatory per‑sensor
+  exclusive `reset-gpios` is the **only** real mismatch.
+- A known NVIDIA‑forum thread (*"Can't detect the camera I2C address using J106 board on tx2"*)
+  shows the **identical** symptom (same `echo 461 … value 0 … value 1` toggle; `0x10` on A/C/E,
+  NACK on `0x12` B/D/F). RidgeRun's official J106/TX2 guide solves it by **rebuilding the kernel
+  with an IMX219 driver patch** — confirming the path below. **No public J106 schematic exists**
+  (Auvidea ships only the technical reference; a full schematic is request‑only/NDA).
+
+### 7.4 The fix (chosen) — patch the driver to share the one reset, mirroring TX1
+[`patches/0001-imx219-share-reset-gpio-j106.patch`](patches/0001-imx219-share-reset-gpio-j106.patch)
+makes the driver: treat `-EBUSY` from `gpio_request()` as success, and **never free** the shared
+reset. Then **all 6 sensors point `reset-gpios` at the one real line (461)** — **no dummy pins**,
+nothing disturbing the cameras.
+
+Build status (on WSL, `/tmp/j106build/r3276`):
+- ✅ R32.7.6 `public_sources` downloaded; kernel source = **4.9.337** confirmed.
+- ✅ Official **Linaro 7.3.1** toolchain (NVIDIA‑hosted) extracted & working.
+- ✅ Config = the **board's own `/proc/config.gz`**; `make kernelrelease` → **`4.9.337-tegra`**
+  (matches running kernel, so existing modules stay compatible — `LOCALVERSION=-tegra`,
+  `CONFIG_LOCALVERSION_AUTO` off).
+- ✅ Driver patch applied to `ksrc/.../imx219.c`.
+- ⏳ **`make … Image` not yet run** (paused here).
+
+### 7.5 Next steps (continue tomorrow)
+1. **Build the Image:**
+   `make -C ksrc/kernel/kernel-4.9 O=kout ARCH=arm64 CROSS_COMPILE=<linaro>/bin/aarch64-linux-gnu- LOCALVERSION=-tegra -j$(nproc) Image`
+2. **Rework the dtsi to the shared‑reset model:** put `reset-gpios = <&tegra_main_gpio
+   J106_CAM_RST GPIO_ACTIVE_LOW>` back into `IMX219_HW_RESOURCES`, **delete** the
+   `IMX219_DUMMY_RST(...)` per‑sensor pins, keep the `j106-camera-reset-release` hog and
+   `cam_dummy_reg`. (Consider a reset **pulse** rather than static‑high to match the forum's
+   cold‑boot fix.)
+3. **Enable the capture pipeline:** add `status="okay"` to the `vi@15700000` ports/endpoints and
+   `nvcsi@150c0000` channels/ports/endpoints (~36 overrides) — they inherit `disabled` from the
+   stock devkit tree merge, so there is **no `/dev/video*`** until enabled.
+4. **Rebuild the J106 DTB** (stock‑c03 base + USB override + reworked camera dtsi).
+5. **Deploy reversibly:** copy patched `Image`→`/boot/Image.j106` and the new DTB; add a **new**
+   `extlinux` `LABEL` using them while keeping the working USB‑only entry as fallback. Reboot.
+6. **Verify:** `dmesg | grep imx219` (expect valid model id, no `-16`/`model id 00`),
+   `ls /dev/video0..5`, then a `v4l2-ctl --stream-mmap` / `nvarguscamerasrc sensor-id=0..5` test.
+
+> Fallback always available: `extlinux` `DEFAULT j106usb` (USB working) and backup
+> `/boot/extlinux/extlinux.conf.backup-pre-j106`; partition DTB (`mmcblk0p30`) untouched.
