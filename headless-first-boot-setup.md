@@ -1,9 +1,15 @@
-# Headless first-boot (oem-config) on TX2 / J106 — over micro-USB, no monitor
+# Headless first-boot (oem-config) on TX2 — over micro-USB, no monitor
 
-How to take a **freshly-flashed** Jetson TX2 (L4T R32.7.6) on the Auvidea **J106/M110**
-carrier through NVIDIA's first-boot **`nv-oem-config`** wizard **with no display and no
-keyboard** — using only the carrier's serial links. Verified end-to-end on the actual board
-**2026-06-09**.
+How to take a **freshly-flashed** Jetson TX2 (L4T R32.7.6) through NVIDIA's first-boot
+**`nv-oem-config`** wizard **with no display and no keyboard** — using only serial links.
+Verified end-to-end **2026-06-09** with the module on the **XCB-Lite** carrier. The procedure
+is **carrier-independent** (it uses only the micro-USB device-mode gadget + the debug UART), so
+use the same steps when you first bring the module up on any carrier.
+
+> **Carrier note:** this setup was done on **XCB-Lite**. The module does **not** currently work
+> on the **Auvidea J106** carrier — on J106 the stock devkit DTB leaves the carrier peripherals
+> (cameras, USB, etc.) non-functional until you flash the carrier DTB; see [README §5](README.md).
+> The first-boot below is a prerequisite either way (you need a login before any DTB work).
 
 > TL;DR: The first-boot wizard runs **only** on the micro-USB **device-mode** port
 > (`/dev/ttyACMx`), as an ncurses `dialog` UI — **not** on the debug UART. Do **not** waste
@@ -19,7 +25,7 @@ keyboard** — using only the carrier's serial links. Verified end-to-end on the
 |------|----------|-------------|---------|
 | **USB-TTL** (CH340 etc.) | debug UART (`ttyS0`) | `/dev/ttyUSB0` @ **115200 8N1** | Watch boot, drive U-Boot, SysRq reboot |
 | **micro-USB** | device-mode/recovery port | `/dev/ttyACM0` + `192.168.55.x` net | **Run the first-boot wizard**, then SSH |
-| **Ethernet** | M110 RJ45 (Tegra EQOS) | — | LAN/SSH after setup (no carrier ≠ TX2 fault) |
+| **Ethernet** | carrier RJ45 | — | LAN/SSH after setup (had no carrier during this run) |
 
 Enumeration sanity-check on the host:
 ```bash
@@ -123,12 +129,13 @@ Ubuntu 18.04.6 LTS
 
 ## 4. After first boot
 
-- **Primary admin link** is the micro-USB net (`192.168.55.1`) — always available.
-- **Ethernet** (`eth0`, M110 RJ45) had **no carrier** during setup; if you want LAN SSH, check
-  the cable/switch (it's the Tegra EQOS PHY, see [README §3c](README.md)). It is not a fault
-  introduced by setup.
-- Next hardware step for this carrier is the **cameras + USB VBUS DTB** — see the
-  [main README](README.md). The first-boot above is a prerequisite (you need a login first).
+- **Primary admin link** is the micro-USB net (`192.168.55.1`) — always available regardless of
+  carrier, so it's the reliable way in during any bring-up.
+- **Ethernet** (`eth0`) had **no carrier** during this run; if you want LAN SSH, check the
+  cable/switch. Not a fault introduced by setup.
+- **Moving the module to J106:** the stock DTB does not drive the J106 carrier, so cameras/USB
+  (and more) are dead until the **carrier DTB** is built and flashed — see [README §5](README.md).
+  J106 bring-up is **not working yet**. First-boot (above) only needs to be done once per flash.
 
 ---
 
@@ -137,7 +144,8 @@ Ubuntu 18.04.6 LTS
 - The board reports `P2771-0000-500` / `model = quill` in U-Boot — that's the **stock NVIDIA
   devkit DTB**, expected before the carrier DTB is flashed (matches README §3b).
 - The `pca953x … -121` and `ina3221 … 0xffffff87` errors in the boot log are the devkit-only
-  I²C devices absent on J106/M110 — **not** related to first-boot; harmless here.
+  I²C devices absent on non-devkit carriers (XCB-Lite, J106) — **not** related to first-boot;
+  harmless here.
 - A solid stream of high-bit garbage on the UART = wrong baud or a 5V/3.3V level mismatch on
   the TTL adapter; the console is **115200** and TX2 UART is **3.3V**.
 - If the micro-USB gadget never enumerates, you cannot complete setup over serial alone — the
