@@ -95,6 +95,179 @@ Available TX2 i2c controllers: `gen1_i2c@3160000`, `gen2_i2c@c240000`,
 
 ---
 
+## 3a. Camera pipeline architecture — TX1 vs TX2 (diagrams)
+
+These two diagrams show all six IMX219 pipelines end‑to‑end on each platform,
+including the hardware ISP. Cross‑checked against the real device trees:
+`bsp_L4T_24_2_1_V2.2/.../tegra210-imx219.dts` (TX1) and the decompiled stock
+c03 DTB (TX2).
+
+### TX1 (L4T R24.2.1, tegra210) — VI‑only **2‑hop** graph, **2× ISP**
+
+```mermaid
+flowchart LR
+    subgraph I2C["I2C control"]
+        B0["i2c@7000c000 (adpt 0)"]
+        B6["i2c@546c0000 (adpt 6)"]
+        B2["i2c@7000c500 (adpt 2)"]
+    end
+    RST["shared reset<br/>&lt;&amp;gpio 148 1&gt; (all 6)"]
+
+    subgraph SENS["6x IMX219 sensors (port@0 / endpoint, 2-lane MIPI, raw Bayer)"]
+        A["imx219_a@10  csi-port=0<br/>ep o0 (bottomleft)"]
+        Bb["imx219_b@12  csi-port=1<br/>ep o1 (bottomright)"]
+        C["imx219_c@10  csi-port=2<br/>ep o2 (centerleft)"]
+        D["imx219_d@12  csi-port=3<br/>ep o3 (centerright)"]
+        E["imx219_e@10  csi-port=4<br/>ep o4 (topright)"]
+        F["imx219_f@12  csi-port=5<br/>ep o5 (topleft)"]
+    end
+
+    subgraph VI["host1x / vi@54080000  (nvidia,tegra210-vi, num-channels=6) — capture + DMA"]
+        V0["vi port@0 (CSI A)"]
+        V1["vi port@1 (CSI B)"]
+        V2["vi port@2 (CSI C)"]
+        V3["vi port@3 (CSI D)"]
+        V4["vi port@4 (CSI E)"]
+        V5["vi port@5 (CSI F)"]
+    end
+
+    NVMM["NVMM surfaces<br/>(NvBuffer / dmabuf in unified LPDDR)"]
+    N["/dev/video0..5<br/>raw Bayer SRGGB10 (ISP bypassed)"]
+
+    subgraph ISPHW["Hardware ISP (in DTB, status=okay) — engaged by libargus"]
+        ISPA["isp@54600000<br/>tegra210-isp (ISP-A)"]
+        ISPB["isp@54680000<br/>tegra210-isp (ISP-B)"]
+    end
+    ARG["Argus / nvarguscamerasrc<br/>-> debayered YUV/NV12 + 3A<br/>(stays in NVMM -> CUDA/NVENC)"]
+
+    B0 -. 0x10 .-> A
+    B0 -. 0x12 .-> Bb
+    B6 -. 0x10 .-> C
+    B6 -. 0x12 .-> D
+    B2 -. 0x10 .-> E
+    B2 -. 0x12 .-> F
+    RST -.-> A & Bb & C & D & E & F
+
+    A == "remote-endpoint" ==> V0
+    Bb ==> V1
+    C ==> V2
+    D ==> V3
+    E ==> V4
+    F ==> V5
+
+    V0 & V1 & V2 & V3 & V4 & V5 ==> NVMM
+    NVMM --> N
+    NVMM == "Argus binds isp@ at runtime<br/>(not a DT graph hop)" ==> ISPA
+    ISPA -.HW debayer + 3A.-> ARG
+    ISPB -.parallel instance.-> ARG
+```
+
+### TX2 (L4T R32.7.6, tegra186 / J106) — NVCSI+VI **3‑hop** graph, **1× ISP**
+
+```mermaid
+flowchart LR
+    subgraph I2C["I2C control"]
+        B0["i2c@c240000"]
+        B1["i2c@3180000"]
+        B2["i2c@c250000"]
+    end
+    RST["shared reset<br/>J106_CAM_RST (all 6)"]
+
+    subgraph SENS["6x IMX219 sensors (port@0 / endpoint, 2-lane MIPI, raw Bayer)"]
+        A["imx219_a@10  port-index=0"]
+        Bb["imx219_b@12  port-index=1"]
+        C["imx219_c@10  port-index=2"]
+        D["imx219_d@12  port-index=3"]
+        E["imx219_e@10  port-index=4"]
+        F["imx219_f@12  port-index=5"]
+    end
+
+    subgraph NVCSI["host1x / nvcsi@150c0000 (nvidia,tegra186-csi) — CSI-2 receiver, 6 channels"]
+        CH0["channel@0  p0->p1"]
+        CH1["channel@1  p0->p1"]
+        CH2["channel@2  p0->p1"]
+        CH3["channel@3  p0->p1"]
+        CH4["channel@4  p0->p1"]
+        CH5["channel@5  p0->p1"]
+    end
+
+    subgraph VI["host1x / vi@15700000 (nvidia,tegra186-vi, num-channels=6) — capture + DMA"]
+        V0["vi port@0"]
+        V1["vi port@1"]
+        V2["vi port@2"]
+        V3["vi port@3"]
+        V4["vi port@4"]
+        V5["vi port@5"]
+    end
+
+    NVMM["NVMM surfaces<br/>(NvBuffer / dmabuf in unified LPDDR)"]
+    N["/dev/video0..5<br/>raw Bayer (ISP bypassed)"]
+
+    subgraph ISPHW["Hardware ISP — ONE instance"]
+        ISPA["isp@15600000<br/>nvidia,tegra186-isp (ISP-A)"]
+    end
+    ARG["Argus / nvarguscamerasrc<br/>-> debayered YUV/NV12 + 3A<br/>(stays in NVMM -> CUDA/NVENC)"]
+
+    B0 -. 0x10 .-> A
+    B0 -. 0x12 .-> Bb
+    B1 -. 0x10 .-> C
+    B1 -. 0x12 .-> D
+    B2 -. 0x10 .-> E
+    B2 -. 0x12 .-> F
+    RST -.-> A & Bb & C & D & E & F
+
+    A == "remote-endpoint" ==> CH0
+    Bb ==> CH1
+    C ==> CH2
+    D ==> CH3
+    E ==> CH4
+    F ==> CH5
+
+    CH0 ==> V0
+    CH1 ==> V1
+    CH2 ==> V2
+    CH3 ==> V3
+    CH4 ==> V4
+    CH5 ==> V5
+
+    V0 & V1 & V2 & V3 & V4 & V5 ==> NVMM
+    NVMM --> N
+    NVMM == "Argus binds isp@ at runtime<br/>(not a DT graph hop)" ==> ISPA
+    ISPA -.HW debayer + 3A.-> ARG
+```
+
+### TX1 ⟷ TX2 pipeline differences
+
+| Aspect | TX1 (tegra210, K3.10) | TX2 (tegra186, K4.9 / J106) |
+|--------|------------------------|------------------------------|
+| Capture graph | **2‑hop**: `sensor → vi port@N` | **3‑hop**: `sensor → nvcsi channel@N → vi port@N` |
+| CSI‑2 receiver in DT | folded into VI (no separate node) | explicit **`nvcsi@150c0000`** with one `channel@N` per stream |
+| Port key on endpoint | `csi-port = N` | `port-index = N` |
+| VI node | `vi@54080000` (`nvidia,tegra210-vi`) | `vi@15700000` (`nvidia,tegra186-vi`) |
+| **Hardware ISP count** | **2** (`isp@54600000`, `isp@54680000`) | **1** (`isp@15600000`) |
+| ISP compatible | `nvidia,tegra210-isp` | `nvidia,tegra186-isp` |
+| I²C buses (A/B, C/D, E/F) | `7000c000`, `546c0000`, `7000c500` | `c240000`, `3180000`, `c250000` |
+| Sensor clock | `cam_mclk1` | `extperiph1` (`TEGRA186_CLK_EXTPERIPH1`) |
+| GPIO ref style | raw `<&gpio 148 1>` | `<&tegra_main_gpio TEGRA_MAIN_GPIO(R,5) ...>` |
+| Camera DT framework | old `camera_common` | **tegracam** (`mode_type`/`pixel_phase`/fixed‑point gain) |
+
+**Why NVCSI is broken out on TX2 (the extra hop):** on Tegra186 the CSI‑2
+receiver is promoted to a first‑class, per‑channel device‑tree block so the SoC
+can do **virtual‑channel (VC) demux**, **deserializer/aggregator** cameras
+(GMSL/FPD‑Link: many cameras over one CSI port), flexible **N:M stream→VI
+routing**, and per‑stream **test‑pattern/error** handling. For one‑camera‑per‑port
+IMX219 (our J106), each `nvcsi channel@N` is just a straight `port@0 → port@1`
+passthrough, so it behaves like TX1's 2‑hop — just two more nodes to set
+`status="okay"`.
+
+**Common to both:** unified LPDDR (UMA) — VI DMAs into **NVMM** buffers shared by
+GPU/ISP/NVENC, so the raw V4L2 path (`/dev/videoN`) bypasses the ISP, while the
+Argus path engages the HW ISP and can stay zero‑copy into CUDA/NVENC
+(`NvBuffer` → EGLImage → CUDA). The 6 sensors share one reset line; the patched
+`imx219` driver (§7.4) never asserts it low so the cameras are independent.
+
+---
+
 ## 3b. LIVE hardware verification (2026‑06‑08, on the actual TX2)
 
 Probed the running board (`nvidia-desktop`, `192.168.0.168`) directly:
