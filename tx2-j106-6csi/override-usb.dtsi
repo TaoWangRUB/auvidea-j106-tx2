@@ -1,0 +1,13 @@
+/* Auvidea J106 carrier - USB VBUS fix (appended to decompiled stock R32.7.6 c03 DTB)
+ *
+ * Stock gates vdd_usb2_5v with an I2C GPIO expander (ti,tca9539 @0x74) that is
+ * absent on the J106 carrier. The regulator therefore never enables and
+ * xusb_padctl defers forever (-EPROBE_DEFER/-517) -> all USB dead.
+ * Drop the expander gpio and force the fixed regulator always-on so no consumer
+ * (port vbus-supply or padctl vbus-2-supply) can defer on the missing chip.
+ */
+&{/fixed-regulators/regulator@17} {
+	/delete-property/ gpio;
+	regulator-always-on;
+	regulator-boot-on;
+};
