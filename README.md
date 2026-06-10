@@ -416,30 +416,37 @@ makes the driver: treat `-EBUSY` from `gpio_request()` as success, and **never f
 reset. Then **all 6 sensors point `reset-gpios` at the one real line (461)** — **no dummy pins**,
 nothing disturbing the cameras.
 
-Build status (on WSL, `/tmp/j106build/r3276`):
+Build status (on WSL, `/tmp/j106build/r3276` for the kernel, `/tmp/j106build` for the DTB):
 - ✅ R32.7.6 `public_sources` downloaded; kernel source = **4.9.337** confirmed.
 - ✅ Official **Linaro 7.3.1** toolchain (NVIDIA‑hosted) extracted & working.
 - ✅ Config = the **board's own `/proc/config.gz`**; `make kernelrelease` → **`4.9.337-tegra`**
   (matches running kernel, so existing modules stay compatible — `LOCALVERSION=-tegra`,
   `CONFIG_LOCALVERSION_AUTO` off).
 - ✅ Driver patch applied to `ksrc/.../imx219.c`.
-- ⏳ **`make … Image` not yet run** (paused here).
+- ✅ **`Image` built** → `kout/arch/arm64/boot/Image` (34 MB, `4.9.337-tegra`, patched
+  `imx219.o` compiled in).
+- ✅ **dtsi reworked to the shared‑reset model** + capture pipeline enabled (below).
+- ✅ **J106 DTB rebuilt** → `tegra186-j106.dtb` (USB fix + 6× imx219 shared reset + vi/nvcsi
+  channels `okay`). Verified by decompile: all 6 sensors `reset-gpios = <&gpio@2200000 141
+  ACTIVE_LOW>` (the one shared line, same pin the reset‑release hog drives), 6 nvcsi channels okay.
 
-### 7.5 Next steps (continue tomorrow)
-1. **Build the Image:**
+### 7.5 Next steps (host‑only work DONE; remaining steps need the board)
+Host‑only build steps (done on WSL, no hardware needed):
+1. ✅ **Built the `Image`:**
    `make -C ksrc/kernel/kernel-4.9 O=kout ARCH=arm64 CROSS_COMPILE=<linaro>/bin/aarch64-linux-gnu- LOCALVERSION=-tegra -j$(nproc) Image`
-2. **Rework the dtsi to the shared‑reset model:** put `reset-gpios = <&tegra_main_gpio
-   J106_CAM_RST GPIO_ACTIVE_LOW>` back into `IMX219_HW_RESOURCES`, **delete** the
-   `IMX219_DUMMY_RST(...)` per‑sensor pins, keep the `j106-camera-reset-release` hog and
-   `cam_dummy_reg`. (Consider a reset **pulse** rather than static‑high to match the forum's
-   cold‑boot fix.)
-3. **Enable the capture pipeline:** add `status="okay"` to the `vi@15700000` ports/endpoints and
-   `nvcsi@150c0000` channels/ports/endpoints (~36 overrides) — they inherit `disabled` from the
-   stock devkit tree merge, so there is **no `/dev/video*`** until enabled.
-4. **Rebuild the J106 DTB** (stock‑c03 base + USB override + reworked camera dtsi).
-5. **Deploy reversibly:** copy patched `Image`→`/boot/Image.j106` and the new DTB; add a **new**
+2. ✅ **Reworked the dtsi to the shared‑reset model:** `reset-gpios = <&tegra_main_gpio
+   J106_CAM_RST GPIO_ACTIVE_LOW>` restored into `IMX219_HW_RESOURCES`, all
+   `IMX219_DUMMY_RST(...)` per‑sensor pins **deleted**, `j106-camera-reset-release` hog and
+   `cam_dummy_reg` kept.
+3. ✅ **Enabled the capture pipeline:** added `status="okay"` to the `vi@15700000`
+   ports/endpoints and `nvcsi@150c0000` channels/ports/endpoints (they inherit `disabled` from
+   the stock devkit tree merge, so there is **no `/dev/video*`** until enabled).
+4. ✅ **Rebuilt the J106 DTB** (stock‑c03 base + USB override + reworked camera dtsi).
+
+Remaining (require the TX2 board — blocked until hardware is back):
+5. ⏳ **Deploy reversibly:** copy patched `Image`→`/boot/Image.j106` and the new DTB; add a **new**
    `extlinux` `LABEL` using them while keeping the working USB‑only entry as fallback. Reboot.
-6. **Verify:** `dmesg | grep imx219` (expect valid model id, no `-16`/`model id 00`),
+6. ⏳ **Verify:** `dmesg | grep imx219` (expect valid model id, no `-16`/`model id 00`),
    `ls /dev/video0..5`, then a `v4l2-ctl --stream-mmap` / `nvarguscamerasrc sensor-id=0..5` test.
 
 > Fallback always available: `extlinux` `DEFAULT j106usb` (USB working) and backup

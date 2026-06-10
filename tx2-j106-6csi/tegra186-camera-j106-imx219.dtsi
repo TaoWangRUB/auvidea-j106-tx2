@@ -135,7 +135,11 @@
 	default_exp_time = "33334";						\
 	embedded_metadata_height = "0";
 
-/* Common hw-resource block placed in every sensor node. */
+/* Common hw-resource block placed in every sensor node.
+ * All 6 J106 sensors share ONE physical reset line (gpio 461). The patched
+ * imx219 driver (patches/0001-imx219-share-reset-gpio-j106.patch) tolerates
+ * -EBUSY on gpio_request() and never frees the line, so every sensor can
+ * reference the same real reset-gpios below - no dummy pins needed. */
 #define IMX219_HW_RESOURCES							\
 	compatible = "nvidia,imx219";						\
 	devnode = "video0";							\
@@ -148,28 +152,13 @@
 	clock-names = "extperiph1", "pllp_grtba";				\
 	mclk = "extperiph1";							\
 	clock-frequency = <24000000>;						\
+	reset-gpios = <&tegra_main_gpio J106_CAM_RST GPIO_ACTIVE_LOW>;		\
 	avdd-reg = "vana";							\
 	iovdd-reg = "vif";							\
 	dvdd-reg = "vdig";						\
 	vana-supply = <&cam_dummy_reg>;					\
 	vif-supply = <&cam_dummy_reg>;					\
 	vdig-supply = <&cam_dummy_reg>;
-
-/*
- * The imx219 driver REQUIRES a reset-gpios entry and calls gpio_request() on it
- * EXCLUSIVELY (one consumer per pin). On the J106 all 6 sensors physically share
- * ONE reset line (TEGRA_MAIN_GPIO(R,5)=141), so they cannot all request it. The
- * real shared reset is instead held released by the gpio-hog below, and each
- * sensor is given its own UNIQUE, otherwise-unused main-GPIO pin here purely to
- * satisfy the driver's mandatory exclusive gpio_request(); toggling these dummy
- * pins is a harmless no-op (they are gpio-mode and unconnected on the J106 - the
- * carrier ties ALL camera resets to the single line 141 only). The pins below are
- * confirmed REQUESTABLE (gpio-mode, free) on the live board via sysfs export;
- * note that many main-GPIO pins are special-function (SFIO) and would fail
- * gpio_request() with -EBUSY, so the specific pins matter.
- */
-#define IMX219_DUMMY_RST(_pin)							\
-	reset-gpios = <&tegra_main_gpio _pin GPIO_ACTIVE_LOW>;
 
 / {
 	/* Camera power on the J106: the Raspberry Pi IMX219 modules are powered
@@ -210,56 +199,69 @@
 	host1x {
 		/* -------- Video Input: 6 channels (CSI A..F) -------- */
 		vi@15700000 {
+			status = "okay";
 			num-channels = <6>;
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
 				port@0 {
 					reg = <0>;
+					status = "okay";
 					j106_vi_in0: endpoint {
 						port-index = <0>;	/* CSI_A */
 						bus-width = <2>;
 						remote-endpoint = <&j106_csi_out0>;
+						status = "okay";
 					};
 				};
 				port@1 {
 					reg = <1>;
+					status = "okay";
 					j106_vi_in1: endpoint {
 						port-index = <1>;	/* CSI_B */
 						bus-width = <2>;
 						remote-endpoint = <&j106_csi_out1>;
+						status = "okay";
 					};
 				};
 				port@2 {
 					reg = <2>;
+					status = "okay";
 					j106_vi_in2: endpoint {
 						port-index = <2>;	/* CSI_C */
 						bus-width = <2>;
 						remote-endpoint = <&j106_csi_out2>;
+						status = "okay";
 					};
 				};
 				port@3 {
 					reg = <3>;
+					status = "okay";
 					j106_vi_in3: endpoint {
 						port-index = <3>;	/* CSI_D */
 						bus-width = <2>;
 						remote-endpoint = <&j106_csi_out3>;
+						status = "okay";
 					};
 				};
 				port@4 {
 					reg = <4>;
+					status = "okay";
 					j106_vi_in4: endpoint {
 						port-index = <4>;	/* CSI_E */
 						bus-width = <2>;
 						remote-endpoint = <&j106_csi_out4>;
+						status = "okay";
 					};
 				};
 				port@5 {
 					reg = <5>;
+					status = "okay";
 					j106_vi_in5: endpoint {
 						port-index = <5>;	/* CSI_F */
 						bus-width = <2>;
 						remote-endpoint = <&j106_csi_out5>;
+						status = "okay";
 					};
 				};
 			};
@@ -267,131 +269,162 @@
 
 		/* -------- NVCSI: 6 channels -------- */
 		nvcsi@150c0000 {
+			status = "okay";
 			num-channels = <6>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			channel@0 {
 				reg = <0>;
+				status = "okay";
 				ports {
 					#address-cells = <1>;
 					#size-cells = <0>;
 					port@0 {
 						reg = <0>;
+						status = "okay";
 						j106_csi_in0: endpoint@0 {
 							port-index = <0>;
 							bus-width = <2>;
 							remote-endpoint = <&j106_imx219_out0>;
+							status = "okay";
 						};
 					};
 					port@1 {
 						reg = <1>;
+						status = "okay";
 						j106_csi_out0: endpoint@1 {
 							remote-endpoint = <&j106_vi_in0>;
+							status = "okay";
 						};
 					};
 				};
 			};
 			channel@1 {
 				reg = <1>;
+				status = "okay";
 				ports {
 					#address-cells = <1>;
 					#size-cells = <0>;
 					port@0 {
 						reg = <0>;
+						status = "okay";
 						j106_csi_in1: endpoint@2 {
 							port-index = <1>;
 							bus-width = <2>;
 							remote-endpoint = <&j106_imx219_out1>;
+							status = "okay";
 						};
 					};
 					port@1 {
 						reg = <1>;
+						status = "okay";
 						j106_csi_out1: endpoint@3 {
 							remote-endpoint = <&j106_vi_in1>;
+							status = "okay";
 						};
 					};
 				};
 			};
 			channel@2 {
 				reg = <2>;
+				status = "okay";
 				ports {
 					#address-cells = <1>;
 					#size-cells = <0>;
 					port@0 {
 						reg = <0>;
+						status = "okay";
 						j106_csi_in2: endpoint@4 {
 							port-index = <2>;
 							bus-width = <2>;
 							remote-endpoint = <&j106_imx219_out2>;
+							status = "okay";
 						};
 					};
 					port@1 {
 						reg = <1>;
+						status = "okay";
 						j106_csi_out2: endpoint@5 {
 							remote-endpoint = <&j106_vi_in2>;
+							status = "okay";
 						};
 					};
 				};
 			};
 			channel@3 {
 				reg = <3>;
+				status = "okay";
 				ports {
 					#address-cells = <1>;
 					#size-cells = <0>;
 					port@0 {
 						reg = <0>;
+						status = "okay";
 						j106_csi_in3: endpoint@6 {
 							port-index = <3>;
 							bus-width = <2>;
 							remote-endpoint = <&j106_imx219_out3>;
+							status = "okay";
 						};
 					};
 					port@1 {
 						reg = <1>;
+						status = "okay";
 						j106_csi_out3: endpoint@7 {
 							remote-endpoint = <&j106_vi_in3>;
+							status = "okay";
 						};
 					};
 				};
 			};
 			channel@4 {
 				reg = <4>;
+				status = "okay";
 				ports {
 					#address-cells = <1>;
 					#size-cells = <0>;
 					port@0 {
 						reg = <0>;
+						status = "okay";
 						j106_csi_in4: endpoint@8 {
 							port-index = <4>;
 							bus-width = <2>;
 							remote-endpoint = <&j106_imx219_out4>;
+							status = "okay";
 						};
 					};
 					port@1 {
 						reg = <1>;
+						status = "okay";
 						j106_csi_out4: endpoint@9 {
 							remote-endpoint = <&j106_vi_in4>;
+							status = "okay";
 						};
 					};
 				};
 			};
 			channel@5 {
 				reg = <5>;
+				status = "okay";
 				ports {
 					#address-cells = <1>;
 					#size-cells = <0>;
 					port@0 {
 						reg = <0>;
+						status = "okay";
 						j106_csi_in5: endpoint@10 {
 							port-index = <5>;
 							bus-width = <2>;
 							remote-endpoint = <&j106_imx219_out5>;
+							status = "okay";
 						};
 					};
 					port@1 {
 						reg = <1>;
+						status = "okay";
 						j106_csi_out5: endpoint@11 {
 							remote-endpoint = <&j106_vi_in5>;
+							status = "okay";
 						};
 					};
 				};
@@ -407,7 +440,6 @@
 
 		imx219_a@10 {
 			IMX219_HW_RESOURCES
-			IMX219_DUMMY_RST(138)
 			reg = <0x10>;
 			mode0 { IMX219_MODE0("serial_a") };
 			mode1 { IMX219_MODE1("serial_a") };
@@ -427,7 +459,6 @@
 
 		imx219_b@12 {
 			IMX219_HW_RESOURCES
-			IMX219_DUMMY_RST(139)
 			reg = <0x12>;
 			mode0 { IMX219_MODE0("serial_b") };
 			mode1 { IMX219_MODE1("serial_b") };
@@ -454,7 +485,6 @@
 
 		imx219_c@10 {
 			IMX219_HW_RESOURCES
-			IMX219_DUMMY_RST(140)
 			reg = <0x10>;
 			mode0 { IMX219_MODE0("serial_c") };
 			mode1 { IMX219_MODE1("serial_c") };
@@ -474,7 +504,6 @@
 
 		imx219_d@12 {
 			IMX219_HW_RESOURCES
-			IMX219_DUMMY_RST(95)
 			reg = <0x12>;
 			mode0 { IMX219_MODE0("serial_d") };
 			mode1 { IMX219_MODE1("serial_d") };
@@ -501,7 +530,6 @@
 
 		imx219_e@10 {
 			IMX219_HW_RESOURCES
-			IMX219_DUMMY_RST(96)
 			reg = <0x10>;
 			mode0 { IMX219_MODE0("serial_e") };
 			mode1 { IMX219_MODE1("serial_e") };
@@ -521,7 +549,6 @@
 
 		imx219_f@12 {
 			IMX219_HW_RESOURCES
-			IMX219_DUMMY_RST(97)
 			reg = <0x12>;
 			mode0 { IMX219_MODE0("serial_f") };
 			mode1 { IMX219_MODE1("serial_f") };
