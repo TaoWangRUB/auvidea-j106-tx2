@@ -526,6 +526,212 @@ sudo ethtool eth0 | grep -E "Speed|Link"
 
 ---
 
+## 5a. L4T resources — download, compile & flash (concrete commands)
+
+This section documents the **exact** steps used to download the L4T R32.7.6 sources, build the
+patched kernel `Image` and the J106 carrier DTB on an x86‑64 WSL host, and deploy them to the
+running TX2. Everything lives under `/tmp/j106build/` on the build host.
+
+### Download L4T R32.7.6 sources
+
+```bash
+mkdir -p /tmp/j106build/r3276 && cd /tmp/j106build/r3276
+
+# 1. BSP + sample rootfs (only needed if you plan to flash the full image;
+#    for DTB-only work the public_sources are enough)
+# https://developer.nvidia.com/embedded/linux-tegra-r3276
+#   → "L4T Driver Package (BSP)"     Jetson_Linux_R32.7.6_aarch64.tbz2
+#   → "Sample Root Filesystem"        Tegra_Linux_Sample-Root-Filesystem_R32.7.6_aarch64.tbz2
+
+# 2. Kernel + DT source (required for both kernel and DTB builds)
+wget https://developer.nvidia.com/downloads/remack-sdksjetson-l4tr3276sourcest186public_sourcestbz2 \
+     -O public_sources.tbz2
+tar xjf public_sources.tbz2
+# This creates Linux_for_Tegra/source/public/kernel_src.tbz2 (among others)
+
+# 3. Extract kernel source
+mkdir -p ksrc
+tar xjf Linux_for_Tegra/source/public/kernel_src.tbz2 -C ksrc
+# Now: ksrc/kernel/kernel-4.9/   (main kernel)
+#      ksrc/hardware/nvidia/...   (platform DT + drivers)
+
+# 4. Toolchain — NVIDIA-hosted Linaro 7.3.1 (the officially supported cross-compiler)
+wget https://developer.nvidia.com/embedded/jetson-linux/bootlin-toolchain-gcc-93 \
+     -O l4t-gcc.tar.xz
+# (If the above link has changed, use the Linaro 7.3.1 aarch64 release directly:
+#  https://releases.linaro.org/components/toolchain/binaries/7.3-2018.05/aarch64-linux-gnu/
+#  gcc-linaro-7.3.1-2018.05-x86_64_aarch64-linux-gnu.tar.xz )
+mkdir -p l4t-gcc && tar xf l4t-gcc.tar.xz -C l4t-gcc
+export CROSS_COMPILE=/tmp/j106build/r3276/l4t-gcc/gcc-linaro-7.3.1-2018.05-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-
+```
+
+### Build the patched kernel Image
+
+The only kernel source change is the IMX219 shared‑reset driver patch
+([`patches/0001-imx219-share-reset-gpio-j106.patch`](patches/0001-imx219-share-reset-gpio-j106.patch)).
+The kernel config comes from the board's own `/proc/config.gz` to guarantee module compatibility.
+
+```bash
+cd /tmp/j106build/r3276
+
+# 1. Apply the driver patch
+cd ksrc
+patch -p1 < /home/taowang/workspace/auvidea-j106/patches/0001-imx219-share-reset-gpio-j106.patch
+cd ..
+
+# 2. Copy the board's running config (extracted earlier via
+#    scp nvidia@192.168.0.168:/proc/config.gz . && zcat config.gz > board-config)
+cp board-config kout/.config
+# Verify LOCALVERSION matches the running kernel:
+#   CONFIG_LOCALVERSION=""          (no suffix beyond -tegra)
+#   CONFIG_LOCALVERSION_AUTO is not set
+
+# 3. Prepare + build
+mkdir -p kout
+make -C ksrc/kernel/kernel-4.9 O=$(pwd)/kout ARCH=arm64 \
+     CROSS_COMPILE=$CROSS_COMPILE LOCALVERSION=-tegra olddefconfig
+
+make -C ksrc/kernel/kernel-4.9 O=$(pwd)/kout ARCH=arm64 \
+     CROSS_COMPILE=$CROSS_COMPILE LOCALVERSION=-tegra -j$(nproc) Image
+
+# Result: kout/arch/arm64/boot/Image (~34 MB)
+# Verify: file kout/arch/arm64/boot/Image
+#   → "Linux kernel ARM64 boot executable Image"
+# Verify version:
+#   strings kout/arch/arm64/boot/Image | grep "4.9.337-tegra"
+```
+
+### Build the J106 carrier DTB
+
+Two build approaches exist. **Approach A** (the one we use) builds from the **decompiled stock
+DTB** — it starts from the board's actual running device tree and layers the J106 carrier
+overrides on top, guaranteeing nothing from the stock tree is lost. **Approach B** builds from
+the NVIDIA DTS sources directly and is documented for reference.
+
+#### Approach A — decompile stock DTB + overlay (used for this project)
+
+```bash
+cd /tmp/j106build
+
+# 1. Get the stock DTB from the board
+scp nvidia@192.168.0.168:/boot/dtb/tegra186-quill-p3310-1000-c03-00-base.dtb stock-c03.dtb
+# or from the BSP: Linux_for_Tegra/kernel/dtb/tegra186-quill-p3310-1000-c03-00-base.dtb
+
+# 2. Decompile to editable DTS
+dtc -I dtb -O dts stock-c03.dtb -o stock-c03.dts
+
+# 3. Add label definitions the camera dtsi needs (the decompiled DTS has these
+#    as string properties in __symbols__ but not as DTS labels):
+#    Find "clock@5000000 {" and change to "tegra_car: clock@5000000 {"
+#    Find "gpio@2200000 {"  and change to "tegra_main_gpio: gpio@2200000 {"
+# (Use sed, an editor, or patch — only two lines need changing.)
+
+# 4. Create the combined J106 DTS by appending the carrier overrides
+SRC=/home/taowang/workspace/auvidea-j106/tx2-j106-6csi
+cat stock-c03.dts \
+    "$SRC/tegra186-camera-j106-imx219.dtsi" \
+    "$SRC/override-usb.dtsi" \
+    > tegra186-j106.dts
+
+# 5. Compile
+dtc -I dts -O dtb -@ -o tegra186-j106.dtb tegra186-j106.dts \
+    2> tegra186-j106.dtc.log
+echo "DTB: $(stat -c%s tegra186-j106.dtb) bytes"
+echo "DTC warnings: $(wc -l < tegra186-j106.dtc.log)"
+# (dtc warnings about phandle references and unit-address are normal for
+# decompiled + re-compiled trees — they don't affect functionality.)
+```
+
+#### Approach B — build from NVIDIA kernel DTS sources (reference)
+
+This uses the full NVIDIA DTS source tree and the build script
+([`tx2-j106-6csi/build-dtb.sh`](tx2-j106-6csi/build-dtb.sh)). It requires the Auvidea
+base DTS (`tegra186-j106-usb.dts`) which lives in the kernel source tree at
+`hardware/nvidia/platform/t18x/quill/kernel-dts/`. The base DTS `#include`s the standard
+NVIDIA platform dtsi files and the Auvidea carrier overrides.
+
+```bash
+KSRC=/tmp/j106build/kernel_src
+# Place the camera dtsi where the DTS can find it
+cp tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi \
+   $KSRC/hardware/nvidia/platform/t18x/common/kernel-dts/t18x-common-platforms/
+
+# Build using the helper script (handles cpp + dtc with all include paths)
+./tx2-j106-6csi/build-dtb.sh \
+   $KSRC/hardware/nvidia/platform/t18x/quill/kernel-dts/tegra186-j106-usb.dts \
+   tegra186-j106.dtb
+```
+
+### Deploy to the TX2 (reversible, over SSH)
+
+The deployment is **fully reversible** — we use `extlinux.conf` boot labels with a fallback,
+and never touch the partition DTB (`mmcblk0p30`).
+
+```bash
+TARGET=nvidia@192.168.0.168
+
+# 1. Copy the built artifacts
+scp /tmp/j106build/r3276/kout/arch/arm64/boot/Image  $TARGET:/tmp/Image.j106
+scp /tmp/j106build/tegra186-j106.dtb                 $TARGET:/tmp/
+
+# 2. On the board — install with a new boot label
+ssh $TARGET
+sudo cp /tmp/Image.j106          /boot/Image.j106
+sudo cp /tmp/tegra186-j106.dtb   /boot/tegra186-j106.dtb
+
+# 3. Back up extlinux.conf (first time only)
+sudo cp /boot/extlinux/extlinux.conf /boot/extlinux/extlinux.conf.backup-pre-j106
+
+# 4. Add a new LABEL to extlinux.conf (keep the working entry as fallback)
+sudo tee -a /boot/extlinux/extlinux.conf > /dev/null << 'EOF'
+
+LABEL j106cam
+      MENU LABEL J106 cameras + USB
+      LINUX /boot/Image.j106
+      FDT /boot/tegra186-j106.dtb
+      INITRD /boot/initrd
+      APPEND ${cbootargs} root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4 console=ttyS0,115200n8 console=tty0 fbcon=map:0 net.ifnames=0 video=tegrafb no_console_suspend=1 earlycon=uart8250,mmio32,0x03100000
+EOF
+
+# 5. Set the new label as default (can revert by changing back to j106usb or primary)
+#    Edit /boot/extlinux/extlinux.conf: set "DEFAULT j106cam"
+sudo sed -i 's/^DEFAULT .*/DEFAULT j106cam/' /boot/extlinux/extlinux.conf
+
+# 6. Reboot
+sudo reboot
+```
+
+### Rollback
+
+If anything goes wrong, select the fallback at the serial console boot menu, or from a
+working SSH session:
+
+```bash
+# Revert to USB-only working DTB (no camera changes)
+sudo sed -i 's/^DEFAULT .*/DEFAULT j106usb/' /boot/extlinux/extlinux.conf
+sudo reboot
+
+# Or revert to the completely stock config
+sudo cp /boot/extlinux/extlinux.conf.backup-pre-j106 /boot/extlinux/extlinux.conf
+sudo reboot
+```
+
+### File map (build directory)
+
+| Path | What |
+|------|------|
+| `/tmp/j106build/r3276/ksrc/` | R32.7.6 kernel + NVIDIA driver source |
+| `/tmp/j106build/r3276/kout/` | Kernel build output (out‑of‑tree) |
+| `/tmp/j106build/r3276/kout/arch/arm64/boot/Image` | Patched kernel image |
+| `/tmp/j106build/r3276/l4t-gcc/` | Linaro 7.3.1 cross‑toolchain |
+| `/tmp/j106build/r3276/board-config` | Board's `/proc/config.gz` (extracted) |
+| `/tmp/j106build/kernel_src/` | Auvidea R32.2.1 DTS source (for Approach B) |
+| `/tmp/j106build/stock-c03.dtb` | Stock devkit DTB (decompiled base) |
+| `/tmp/j106build/tegra186-j106.dtb` | Final J106 carrier DTB |
+| `tx2-j106-6csi/build-dtb.sh` | DTB build helper script (Approach B) |
+
+---
+
 ## 6. Notes / gotchas
 
 - **No i2c mux needed.** Unlike the NVIDIA devkit `imx274-dual` example (which uses a
@@ -544,29 +750,60 @@ sudo ethtool eth0 | grep -E "Speed|Link"
 Live work on the actual TX2 (over `ssh`, DTBs built on WSL with `dtc`, deployed via a
 **reversible** `extlinux` `FDT` line with a backup — partition DTB never touched).
 
-### 7.1 USB — ✅ DONE & VERIFIED
+### 7.1 USB host ports — ✅ DONE & VERIFIED
 The §3c/§5.4 VBUS fix is implemented and deployed. The carrier DTB deletes the `gpio`
 property from the devkit VBUS regulator (`fixed-regulators/regulator@17`) and forces it
 `regulator-always-on` / `regulator-boot-on`, replacing the absent `pca953x` expander path.
 Result: `-517` defer gone, `xhci@3530000` registers, **two USB root hubs enumerate**. Survives
 reboots (incl. crash‑recovery). Deployed as `/boot/tegra186-j106.dtb`, `extlinux` `DEFAULT j106usb`.
 
-### 7.2 Cameras — IN PROGRESS (driver patch built, not yet deployed)
+### 7.1a Micro‑USB OTG (device mode) — DIAGNOSED, fix staged (needs board to verify)
+Separate from the host‑port fix above. Symptom: the micro‑USB does **not** appear on a host PC
+(no device‑mode gadget). Root cause found from the PDFs + decompiled DTB (no hardware needed):
+- **Wiring:** the J106 has **no OTG connector** of its own (its micro‑USB3 conns J2/J3 are USB3
+  *host*). USB0/OTG leaves the J106 only via **motherboard connector J16** (USB0‑D±, USB0_VBUS,
+  USB0_EN) to the **M110**, where it is exposed as **connector J17**. So the micro‑USB you plug is
+  **M110 J17** (J106↔M110 via J15/16/17). On the M110, **USB0_ID (A36) floats** and **USB0_VBUS
+  (B37)** is tied to the M110's own switched 5V — the host's VBUS is **not** routed to a Tegra
+  detect GPIO.
+- **DTB:** stock `usb2-0` is `mode = "otg"` and its role switch is driven by `extcon@1` ("VBUS")
+  whose detect line is the **devkit's main GPIO 159**, with VBUS‑source enable `vdd-usb0-5v` on
+  **main GPIO 92** — both devkit pins, not the Auvidea routing. So `extcon` never reports
+  "attached" → `xudc@3550000` never switches to peripheral → the micro‑USB never enumerates.
+  (Same class of bug as the host‑VBUS issue: stock DTB depends on devkit GPIOs absent on the
+  carrier.)
+- **Staged fix** (in `tx2-j106-6csi/override-usb.dtsi`): force the OTG port to **peripheral** so
+  `xudc` owns it unconditionally, bypassing the unwired extcon detect — set `ports/usb2-0`
+  `mode = "device"` (and `lanes/usb2-0` `nvidia,function = "xudc"`). Exact node paths confirmed
+  against the decompiled tree before building.
+- **Verify on board:** `systemctl is-active nv-l4t-usb-device-mode`; `dmesg | grep -iE
+  "xudc|extcon|otg|3550000|role"`; `cat /sys/class/usb_role/*/role` (expect `device`); confirm the
+  gadget enumerates on the host PC. Deploy as a **new** `extlinux` `LABEL`, keep `j106usb` as
+  fallback.
+
+### 7.2 Cameras — IN PROGRESS (deployed, sensors probe; streaming debug ongoing)
 What works now:
 - **Reset gpio request solved.** A uniquely‑named gpio‑hog `j106-camera-reset-release`
   (`status="okay"`) claims and releases the shared reset (gpio 461). Verified live:
   `gpio-461 … j106-camera-reset-re out hi`. (A same‑named node silently merges into the stock
   devkit's *disabled* `camera-control-output-high` hog — hence the rename.)
-- With per‑sensor **dummy** reset pins + an always‑on **dummy regulator** (`cam_dummy_reg`),
-  the driver now loads `tegracam … imx219_v2.0.6` and `i2cdetect` shows **`UU` at 0x10/0x12 on
-  all 3 buses** (all 6 sensors bound).
+- **Driver patch deployed.** The patched `Image` (with
+  `0001-imx219-share-reset-gpio-j106.patch`) and the camera DTB are deployed on the board.
+  All 6 sensors probe successfully with **valid model IDs** — `dmesg` shows
+  `imx219 1-0010`, `1-0012`, `2-0010`, `2-0012`, `7-0010`, `7-0012` bound, and
+  `/dev/video0..5` are created.
+- **MCLK confirmed running** at 24 MHz (`extperiph1` clock enabled by the driver).
+- **Sensor confirmed streaming** — register `0x0100` reads `0x01` (streaming bit set) after
+  `v4l2-ctl --stream-mmap` is issued.
 
-The wall:
-- Sensors then read **`invalid sensor model id: 00`** (and `-121` NACK on the shifted `0x12`).
-  Root cause: the requestable dummy pins live in the camera‑control region and are **physically
-  connected** on the J106, so driving them (the driver's reset assert) **disturbs the cameras**;
-  the truly‑unconnected pins are SFIO and fail `gpio_request()`. A genuine catch‑22.
-  *(Danger noted: exporting AON gpios 256–275 crash‑reboots the board — do not poke them.)*
+The wall — **streaming fails** (no frames captured):
+- **SMMU fault at iova=0x0**: the VI4 hardware writes to DMA address 0 and the IOMMU faults.
+  Root cause identified and fixed — see §7.6.
+- **NVCSI PP_FSM_TIMEOUT** (`INTR_STATUS=0x8`): the D‑PHY pixel parser never locks onto
+  incoming MIPI data. Occasional `PD_CRC_ERR` (`0x4`) suggests some data arrives but is
+  corrupted. This is the **current blocking issue** — see §7.6.
+- *(Historical: the earlier "invalid sensor model id: 00" was caused by dummy reset pins
+  disturbing the cameras. Solved by the shared‑reset driver patch above.)*
 
 ### 7.3 Why TX1 works and what fixes TX2 (root‑cause, confirmed)
 - The **J106 technical reference** confirms: **pin 6 (CAM‑RST, active‑low) of all 6 CSI
@@ -614,7 +851,7 @@ Build status (on WSL, `/tmp/j106build/r3276` for the kernel, `/tmp/j106build` fo
   channels `okay`). Verified by decompile: all 6 sensors `reset-gpios = <&gpio@2200000 141
   ACTIVE_LOW>` (the one shared line, same pin the reset‑release hog drives), 6 nvcsi channels okay.
 
-### 7.5 Next steps (host‑only work DONE; remaining steps need the board)
+### 7.5 Build & deployment log
 Host‑only build steps (done on WSL, no hardware needed):
 1. ✅ **Built the `Image`:**
    `make -C ksrc/kernel/kernel-4.9 O=kout ARCH=arm64 CROSS_COMPILE=<linaro>/bin/aarch64-linux-gnu- LOCALVERSION=-tegra -j$(nproc) Image`
@@ -627,11 +864,142 @@ Host‑only build steps (done on WSL, no hardware needed):
    the stock devkit tree merge, so there is **no `/dev/video*`** until enabled).
 4. ✅ **Rebuilt the J106 DTB** (stock‑c03 base + USB override + reworked camera dtsi).
 
-Remaining (require the TX2 board — blocked until hardware is back):
-5. ⏳ **Deploy reversibly:** copy patched `Image`→`/boot/Image.j106` and the new DTB; add a **new**
-   `extlinux` `LABEL` using them while keeping the working USB‑only entry as fallback. Reboot.
-6. ⏳ **Verify:** `dmesg | grep imx219` (expect valid model id, no `-16`/`model id 00`),
-   `ls /dev/video0..5`, then a `v4l2-ctl --stream-mmap` / `nvarguscamerasrc sensor-id=0..5` test.
+Deployment (on the TX2 board over SSH):
+5. ✅ **Deployed reversibly:** patched `Image`→`/boot/Image.j106` and camera DTB →
+   `/boot/tegra186-j106.dtb`; new `extlinux` `LABEL j106cam` using them. Working USB‑only
+   entry kept as `LABEL j106usb` fallback.
+6. ✅ **Sensors probe correctly:** `dmesg | grep imx219` shows all 6 sensors bound with valid
+   model IDs. `/dev/video0..5` present.
+7. ⏳ **Streaming fails** — see §7.6 for the debug investigation and §7.7 for what remains.
+
+### 7.6 Camera streaming debug (2026‑06‑09 → 2026‑06‑10)
+
+After sensors probed successfully, `v4l2-ctl --stream-mmap` hangs and times out. The debug
+investigation identified two separate issues — both now have fixes deployed but **not yet
+verified** (SSH connection dropped after the last DTB deployment + reboot).
+
+#### 7.6.1 SMMU fault at iova=0x0 — FIXED (embedded_metadata_height)
+
+**Symptom:** `arm-smmu 12000000.iommu: Unhandled context fault: iova=0x0, fsr=0x402`
+immediately on stream start, before any frame data. The VI4 hardware writes to DMA address
+zero and the IOMMU faults.
+
+**Root cause:** the VI4 frame‑capture path (`vi4_fops.c:vi4_channel_capture_frame_init`)
+programs three ATOMP surface offsets for DMA:
+- `ATOMP_SURFACE_OFFSET0` — the main image buffer (correctly mapped)
+- `ATOMP_EMB_SURFACE_OFFSET0` — embedded metadata buffer
+- `ATOMP_SURFACE_OFFSET1/2` — unused extra planes
+
+When `embedded_metadata_height = "0"` (as it was in our dtsi), the driver **never allocates** an
+embedded‑data buffer, so `ATOMP_EMB_SURFACE_OFFSET0` is programmed to **0x0** — an unmapped
+IOVA. The hardware writes there → SMMU fault. `ATOMP_SURFACE_OFFSET1/2` are similarly always 0.
+
+NVIDIA's own IMX274 example uses `embedded_metadata_height = "1"`, which causes the driver to
+allocate a real DMA buffer for the embedded metadata surface, giving it a valid non‑zero IOVA.
+
+**Fix applied:** changed `embedded_metadata_height` from `"0"` to `"1"` in both `IMX219_MODE0`
+and `IMX219_MODE1` macros in the dtsi. This is already committed in the current
+`tegra186-camera-j106-imx219.dtsi`.
+
+**What did NOT work:**
+- `iommu.passthrough=1` kernel cmdline — Tegra186's ARM SMMU ignores this parameter (possibly
+  firmware‑configured). Additionally caused an **MC VPR violation** (`mc-err: csw_viw: MC request
+  violates VPR requirements, addr = 0x3ffffffc0`). Reverted.
+- `skip_mapping` debugfs write — command hung indefinitely.
+
+#### 7.6.2 NVCSI PP_FSM_TIMEOUT — UNDER INVESTIGATION (pinmux fix deployed, unverified)
+
+**Symptom:** `NVCSI INTR_STATUS = 0x8` = bit 3 = `PP_FSM_TIMEOUT` — the NVCSI pixel parser
+state machine times out waiting for valid D‑PHY data. The MIPI receiver never locks onto the
+sensor's serial data stream. Occasional `PD_CRC_ERR` (`INTR_STATUS = 0x4`) suggests some data
+is reaching the receiver but is corrupted.
+
+**What was confirmed working (not the cause):**
+- Sensor IS streaming: I²C register `0x0100` reads `0x01` (streaming mode enabled) after
+  `v4l2-ctl --stream-mmap` is issued.
+- MCLK IS running: `extperiph1` clock is enabled and measured at 24 MHz by the driver.
+- Reset IS deasserted: gpio‑hog confirmed driving the line high.
+- PLL settings match the working TX1 configuration.
+
+**Root cause hypothesis — wrong EXTPERIPH1 pinmux (MCLK not reaching the physical pin):**
+
+The Tegra186 pinmux controller multiplexes each physical pin between GPIO mode and SFIO
+(Special Function I/O) mode. Register bit 10 selects: `0` = SFIO, `1` = GPIO.
+
+The **previous session's** pinmux "fix" (from a research-only pass) wrote to the **wrong
+register**:
+- Register `0x02430040` (offset `0x40`) = **`gpio_cam5_pn4`** (function `VGP5`) — an
+  unrelated GPIO pin
+- The correct register is `0x02430008` (offset `0x08`) = **`extperiph1_clk_po0`** (function
+  `extperiph1`) — the actual MCLK output pin
+
+Found via the pinctrl driver source (`pinctrl-tegra186.c`):
+```c
+PINGROUP(extperiph1_clk_po0, EXTPERIPH1, RSVD1, RSVD2, RSVD3, 0x0008, ...)
+PINGROUP(gpio_cam5_pn4,      VGP5,       SPI4,  RSVD2, RSVD3, 0x0040, ...)
+```
+
+Reading the correct register: `devmem 0x02430008` → `0x400` (bit 10 set = GPIO mode). The
+EXTPERIPH1 clock is electrically enabled inside the SoC, but the pin is in GPIO mode so **no
+clock signal reaches the physical pin** and the sensors have no MCLK.
+
+**Fix applied (two attempts):**
+1. ❌ **Manual `devmem` write** (`devmem 0x02430008 32 0x00`) — register changed to `0x00` (SFIO
+   mode confirmed), but streaming still failed. Hypothesis: the pinmux change takes effect but
+   something else also needs to change, or the write happened too late in the pipeline setup.
+2. ✅ **DT pinmux config under the `common` group** — placed the EXTPERIPH1 pin configuration
+   as a child of the existing `pinmux@2430000 / common` group (which is already referenced by
+   `pinctrl-0` = "default" and applied at boot). A **standalone** `j106_cam_mclk` group was tried
+   first but was NOT applied because it wasn't referenced by any `pinctrl-0` property.
+
+   ```dts
+   / {
+       pinmux@2430000 {
+           common {
+               extperiph1_clk_po0 {
+                   nvidia,pins = "extperiph1_clk_po0";
+                   nvidia,function = "extperiph1";
+                   nvidia,tristate = <0>;
+                   nvidia,enable-input = <0>;
+                   nvidia,pull = <0>;
+               };
+           };
+       };
+   };
+   ```
+
+   This is committed in the current dtsi. The DTB was rebuilt and deployed, but **SSH
+   dropped after reboot** before verification could complete.
+
+**If the pinmux fix resolves the MCLK routing, streaming should work.** If it doesn't, the
+remaining suspect is the **CSI physical layer** — lane connectivity, signal integrity, or a
+D‑PHY timing parameter mismatch.
+
+### 7.7 Next steps (remaining work — needs the board)
+
+1. ⏳ **Verify the latest DTB** — the board was rebooted with the DTB containing both fixes
+   (embedded_metadata_height=1 + EXTPERIPH1 pinmux under `common`). SSH connection dropped
+   before verification. Reconnect and check:
+   ```bash
+   # Confirm pinmux is in SFIO mode at boot
+   sudo busybox devmem 0x02430008   # expect 0x00 (not 0x400)
+   # Test streaming
+   v4l2-ctl -d /dev/video0 --set-fmt-video=width=1920,height=1080,pixelformat=RG10 \
+            --stream-mmap --stream-count=5
+   # Check for SMMU faults (should be gone)
+   dmesg | grep -i "smmu\|iommu\|iova"
+   # Check NVCSI errors (should clear if MCLK now reaches sensors)
+   cat /sys/kernel/debug/150c0000.nvcsi/nvcsi*
+   ```
+2. ⏳ **If streaming still fails** — investigate CSI physical layer:
+   - Check `cil_settletime` values (currently `"0"` = auto; may need manual tuning)
+   - Try a single camera with known‑good cable on CSI‑E (the port confirmed by NVIDIA forums)
+   - Check lane polarity / swap settings
+   - Review `tegra-vi4 15700000.vi: PXL_SOF syncpt timeout` patterns in dmesg
+3. ⏳ **Micro‑USB OTG (§7.1a):** deploy the staged `usb2-0 mode="device"` override and verify
+   the gadget enumerates on a host PC.
+4. ⏳ **UART0 console:** retest with other USB‑TTL adapters/cables at **115200 8N1, no flow
+   control**.
 
 > Fallback always available: `extlinux` `DEFAULT j106usb` (USB working) and backup
 > `/boot/extlinux/extlinux.conf.backup-pre-j106`; partition DTB (`mmcblk0p30`) untouched.

@@ -96,7 +96,7 @@
 	max_exp_time = "683709";						\
 	step_exp_time = "1";							\
 	default_exp_time = "33334";						\
-	embedded_metadata_height = "0";
+	embedded_metadata_height = "1";
 
 #define IMX219_MODE1(_iface)							\
 	mclk_khz = "24000";							\
@@ -133,7 +133,7 @@
 	max_exp_time = "683709";						\
 	step_exp_time = "1";							\
 	default_exp_time = "33334";						\
-	embedded_metadata_height = "0";
+	embedded_metadata_height = "1";
 
 /* Common hw-resource block placed in every sensor node.
  * All 6 J106 sensors share ONE physical reset line (gpio 461). The patched
@@ -173,6 +173,25 @@
 		regulator-max-microvolt = <1800000>;
 		regulator-always-on;
 		regulator-boot-on;
+	};
+};
+
+/* Route the EXTPERIPH1 clock to the physical pin (PO0). Without this,
+ * the pin defaults to GPIO mode (bit 10 set) and the 24 MHz MCLK never
+ * reaches the IMX219 sensors.
+ * This pin config is placed under the "common" pinctrl group which is
+ * referenced by pinctrl-0 ("default") and applied at boot. */
+/ {
+	pinmux@2430000 {
+		common {
+			extperiph1_clk_po0 {
+				nvidia,pins = "extperiph1_clk_po0";
+				nvidia,function = "extperiph1";
+				nvidia,tristate = <0>;
+				nvidia,enable-input = <0>;
+				nvidia,pull = <0>;
+			};
+		};
 	};
 };
 
