@@ -1,21 +1,32 @@
-Subject: [PATCH] imx219: allow 6 sensors to share one reset GPIO (Auvidea J106)
+Subject: [PATCH] imx219: let 6 sensors safely share one reset GPIO (Auvidea J106)
 
 On the Auvidea J106 carrier all 6 IMX219 CSI cameras share a SINGLE physical
 reset line (TEGRA_MAIN_GPIO(R,5) = global sysfs gpio 461), released at boot by a
-gpio-hog. The stock tegracam imx219 driver requires a per-sensor reset-gpios and
-calls gpio_request() on it EXCLUSIVELY (one consumer per pin), then frees it on
-power_put. That makes it impossible for more than one sensor to reference the
-shared line (sensors 2..6 fail probe with -EBUSY/-16), which is exactly why the
-device tree previously needed per-sensor *dummy* reset pins.
+gpio-hog. The stock tegracam imx219 driver assumes a PRIVATE per-sensor reset:
+it gpio_request()s the line EXCLUSIVELY, frees it on power_put, and drives it LOW
+(asserts reset) on every power_on and power_off. With one shared line that breaks
+two ways:
 
-This mirrors how the TX1 R24.2.1 BSP worked (single shared reset toggled once,
-not exclusively owned per sensor). With this patch all 6 sensors point their
-reset-gpios at the one real line (461); the driver:
+  1. sensors 2..6 fail probe with -EBUSY/-16 (the line is already owned), which
+     is why the device tree previously needed per-sensor *dummy* reset pins; and
+  2. even once probed, opening, closing or crashing ONE sensor would drive the
+     shared line low and reset ALL the others mid-stream.
+
+This mirrors how the Auvidea TX1 R24.2.1 BSP solved it (one shared reset,
+released once at boot and NEVER asserted per-sensor). With this patch all 6
+sensors point reset-gpios at the one real line (461) and the driver:
 
   - treats -EBUSY from gpio_request() as success, so a sibling sensor (or the
-    gpio-hog) that already owns the shared line does not fail probe; and
+    gpio-hog) that already owns the shared line does not fail probe;
   - never frees the shared reset line, so unbinding one sensor cannot release
-    reset for the others (or free a descriptor it never owned).
+    reset for the others (or free a descriptor it never owned);
+  - never drives the shared line LOW in power_on or power_off, so starting,
+    stopping or losing one sensor never resets the others. The line is brought
+    high (released) once and left there; IMX219 re-init relies on its I2C
+    software reset (reg 0x0103), exactly like the TX1 driver.
+
+Net effect: the 6 cameras behave as independent devices that merely share a
+reset wire - a missing, stopped or crashed sensor leaves the rest streaming.
 
 Target: L4T R32.7.6 (kernel 4.9.337), drivers/media/i2c/imx219.c.
 Apply from the kernel source root (the dir that contains kernel/nvidia):
@@ -23,7 +34,39 @@ Apply from the kernel source root (the dir that contains kernel/nvidia):
 
 --- a/kernel/nvidia/drivers/media/i2c/imx219.c
 +++ b/kernel/nvidia/drivers/media/i2c/imx219.c
-@@ -433,8 +433,9 @@
+@@ -314,12 +314,10 @@
+ 		return err;
+ 	}
+ 
+-	if (pw->reset_gpio) {
+-		if (gpio_cansleep(pw->reset_gpio))
+-			gpio_set_value_cansleep(pw->reset_gpio, 0);
+-		else
+-			gpio_set_value(pw->reset_gpio, 0);
+-	}
++	/* J106: the reset line is SHARED by all 6 IMX219 and is released once at
++	 * boot by a gpio-hog. Do NOT assert it low here; pulsing reset on a
++	 * power_on would reset every other (possibly streaming) sensor. Mirrors
++	 * the Auvidea TX1 R24.2.1 driver ("release once, never assert"). */
+ 
+ 	if (unlikely(!(pw->avdd || pw->iovdd || pw->dvdd)))
+ 		goto skip_power_seqn;
+@@ -390,12 +388,8 @@
+ 			return err;
+ 		}
+ 	} else {
+-		if (pw->reset_gpio) {
+-			if (gpio_cansleep(pw->reset_gpio))
+-				gpio_set_value_cansleep(pw->reset_gpio, 0);
+-			else
+-				gpio_set_value(pw->reset_gpio, 0);
+-		}
++		/* J106: shared reset - never assert low on power_off, otherwise
++		 * stopping/closing one sensor would reset all the others. (TX1-style.) */
+ 
+ 		usleep_range(10, 10);
+ 
+@@ -433,8 +427,9 @@
  	pw->avdd = NULL;
  	pw->iovdd = NULL;
  
@@ -35,7 +78,7 @@ Apply from the kernel source root (the dir that contains kernel/nvidia):
  
  	return 0;
  }
-@@ -489,9 +490,14 @@
+@@ -489,9 +484,14 @@
  		goto done;
  	}
  

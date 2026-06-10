@@ -412,9 +412,20 @@ The wall:
 
 ### 7.4 The fix (chosen) — patch the driver to share the one reset, mirroring TX1
 [`patches/0001-imx219-share-reset-gpio-j106.patch`](patches/0001-imx219-share-reset-gpio-j106.patch)
-makes the driver: treat `-EBUSY` from `gpio_request()` as success, and **never free** the shared
-reset. Then **all 6 sensors point `reset-gpios` at the one real line (461)** — **no dummy pins**,
-nothing disturbing the cameras.
+makes the driver do three things so all 6 sensors can share the one real line (461) — **no dummy
+pins**, nothing disturbing the cameras:
+1. treat `-EBUSY` from `gpio_request()` as success (a sibling/hog may already own the line);
+2. **never free** the shared reset (unbinding one sensor must not release reset for the others);
+3. **never drive the shared line low** in `power_on`/`power_off` — release it high once (the hog
+   does this at boot) and leave it, so opening, stopping or crashing one sensor never resets the
+   others. IMX219 re‑init uses its I²C software reset (reg `0x0103`).
+
+Cross‑checked against the **Auvidea TX1 R24.2.1 BSP** (`bsp_L4T_24_2_1_V2.2`): its
+`tegra210-imx219.dts` points **all 6** sensors at the **same** `reset-gpios = <&gpio 148 1>`, and
+its driver patch **comments out every `gpio_set_value(reset, 0)`** — i.e. the exact "release once,
+never assert" behavior items 2–3 reproduce on R32. The only structural difference is the capture
+graph: TX1 (k3.10) is **vi‑only (2‑hop)**; TX2 (R32/k4.9) is **nvcsi + vi (3‑hop)**, which the
+dtsi already implements.
 
 Build status (on WSL, `/tmp/j106build/r3276` for the kernel, `/tmp/j106build` for the DTB):
 - ✅ R32.7.6 `public_sources` downloaded; kernel source = **4.9.337** confirmed.
