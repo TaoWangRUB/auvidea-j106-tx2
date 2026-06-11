@@ -11,6 +11,9 @@
 bsp_L4T_24_2_1_V2.2/
 J90_v2.2_4.2.2/
 
+# Build tree: L4T sources, toolchain, kernel build output, DTBs (multi-GB, reproducible)
+j106build/
+
 # Binary/image files
 *.img
 *.bin

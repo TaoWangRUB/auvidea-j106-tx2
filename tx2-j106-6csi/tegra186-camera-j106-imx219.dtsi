@@ -66,9 +66,9 @@
 	num_lanes = "2";							\
 	tegra_sinterface = _iface;						\
 	phy_mode = "DPHY";							\
-	discontinuous_clk = "yes";						\
+	discontinuous_clk = "no";						\
 	dpcm_enable = "false";							\
-	cil_settletime = "0";							\
+	cil_settletime = "17";							\
 	active_w = "3264";							\
 	active_h = "2464";							\
 	mode_type = "bayer";							\
@@ -96,16 +96,16 @@
 	max_exp_time = "683709";						\
 	step_exp_time = "1";							\
 	default_exp_time = "33334";						\
-	embedded_metadata_height = "1";
+	embedded_metadata_height = "2";
 
 #define IMX219_MODE1(_iface)							\
 	mclk_khz = "24000";							\
 	num_lanes = "2";							\
 	tegra_sinterface = _iface;						\
 	phy_mode = "DPHY";							\
-	discontinuous_clk = "yes";						\
+	discontinuous_clk = "no";						\
 	dpcm_enable = "false";							\
-	cil_settletime = "0";							\
+	cil_settletime = "17";							\
 	active_w = "1920";							\
 	active_h = "1080";							\
 	mode_type = "bayer";							\
@@ -133,7 +133,7 @@
 	max_exp_time = "683709";						\
 	step_exp_time = "1";							\
 	default_exp_time = "33334";						\
-	embedded_metadata_height = "1";
+	embedded_metadata_height = "2";
 
 /* Common hw-resource block placed in every sensor node.
  * All 6 J106 sensors share ONE physical reset line (gpio 461). The patched
