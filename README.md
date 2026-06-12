@@ -1156,12 +1156,19 @@ graph hygiene) are restated there.**
 
 ---
 
-## 7.8 ✅ CAMERAS STREAM — root cause was the device tree after all (2026‑06‑11)
+## 7.8 ◑ CAMERAS CAPTURE FRAMES — DT was the (first) blocker; a stability bug remains (2026‑06‑11)
 
-Resumed on the live board (Ethernet `10.42.0.157`). The §7.6.5 "physical layer" conclusion was
-disproven and **streaming now works**: both connected‑and‑probing cameras capture frames reliably
-at 1080p and full‑res. The blocker was **two wrong sensor‑mode properties in the dtsi**, fixed by
-the experiments §7.7 had ranked last.
+Resumed on the live board (Ethernet `10.42.0.157`). The §7.6.5 "physical layer is the blocker"
+conclusion was **disproven**: with the device‑tree fixes below, the cameras **do capture real MIPI
+frames** — for the first ~1–3 captures after a fresh boot. So the §7.6 `PP_FSM_TIMEOUT` (no data
+ever) is genuinely fixed in the **device tree** (the experiments §7.7 ranked last). **But a second,
+separate bug remains:** after a few captures the CSI link **wedges** (DQBUF I/O errors / capture
+timeouts) and stays wedged until reboot. Streaming is therefore **not yet reliable** — see §7.8.5.
+
+⚠️ **Honesty note on the `cil_settletime` sweep (§7.8.2):** that sweep ran only 3 short captures per
+value, which — given the post‑boot degradation — only sampled the *good early window*. It is **not**
+strong evidence that `17` is optimal; an 8‑run soak on the same settle=17 DTB then failed every run.
+Treat the settle value as **unconfirmed**.
 
 ### 7.8.1 The three fixes (all in `tegra186-camera-j106-imx219.dtsi`)
 
@@ -1169,7 +1176,7 @@ the experiments §7.7 had ranked last.
 |---|----------|-----|-----|-----|
 | 1 | `embedded_metadata_height` | `0` → `1` | **`2`** | SMMU `iova=0x0` fix (NVIDIA t186 ref uses `2`); already half‑done in §7.6.1, finished here. |
 | 2 | `discontinuous_clk` | `yes` | **`no`** | **The key fix.** J106 IMX219 run a **continuous** MIPI clock. The tegra186 NVCSI driver only sets the LP‑sequence **bypass** bit (`T18X_BYPASS_LP_SEQ`) when this is `no` (`csi4_fops.c:233`). With `yes`, the receiver policed an LP escape sequence the cameras never send → `PP_FSM_TIMEOUT`, no data. |
-| 3 | `cil_settletime` | `0` (auto) | **`17`** | The driver's auto‑calc produced **22** (`tegra_csi_ths_settling_time`, csi.c:441), too high → corrupted SOT bytes / intermittent capture. A swept manual value of **17** locks the D‑PHY cleanly. |
+| 3 | `cil_settletime` | `0` (auto) | **`17`** *(unconfirmed)* | The driver's auto‑calc produces **22** (`tegra_csi_ths_settling_time`, csi.c:441). A manual **17** appeared best in a short sweep but did **not** survive an 8‑run soak — value is **not yet validated** (see §7.8.5). Fixes #1/#2 stand regardless. |
 
 **Why TX1 worked and TX2 didn't (now fully explained):** TX1's older CSI receiver never policed the
 LP‑sequence, so `discontinuous_clk` was irrelevant there. TX2's tegra186 NVCSI **does** police it
@@ -1190,34 +1197,77 @@ Built three DTBs identical but for `cil_settletime`, deployed/rebooted/tested ea
 `17` is the clear optimum (zero CSI errors, every run delivered all frames). `0`/auto (=22) and `20`
 both fail; `13` works but with stray errors.
 
-### 7.8.3 State on the board now
+### 7.8.3 State on the board now (2026‑06‑12)
 
 - **Active DTB:** `/boot/tegra186-j106-cam.dtb` rebuilt with all three fixes (md5
   `8a45bc4f…`), `extlinux DEFAULT j106cam`, patched `Image.j106`. Prior DTB backed up as
   `/boot/tegra186-j106-cam.dtb.bak-pre-lpbypass`. `j106usb` + stock fallbacks untouched.
 - **Repo dtsi updated** to match (the three values above) — local DTB == deployed DTB.
-- **Cameras live:** only **CSI‑A (`1‑0010`→`/dev/video0`)** and **CSI‑F (`7‑0012`→`/dev/video1`)**
-  currently probe and stream. The other connected ports (**C/D/E**) NACK on I²C this session — a
-  **physical** issue (bus 2 `3180000` fully dark + `7‑0010`), to be fixed by reseating those FPCs and
-  a **cold power‑cycle** (the §4.4 address‑shifter / cold‑boot quirk), not a DT change.
+- **Cameras (5 physically connected: A,C,D,E,F; B empty):** after a cold power‑cycle **A
+  (`1‑0010`), E (`7‑0010`), F (`7‑0012`)** probe and get `/dev/video0..2`. The **C/D pair never
+  probes — its entire I²C bus (`3180000`/i2c‑2) NACKs** at both 0x10/0x12: a physical fault on that
+  bus's fanout (reseat both FPCs; pull‑ups/connector suspect), not DT.
+- **Which video node = which camera varies per boot** (nodes are assigned in probe order of
+  whatever sensors answer). Map via
+  `cat /sys/class/video4linux/videoN/name` → `imx219 <bus>-<addr>` → letter (1=A/B, 2=C/D, 7=E/F).
 
-### 7.8.4 Open steps
+### 7.8.4 🎥 FIRST LIGHT — real image captured end‑to‑end (2026‑06‑12)
 
-1. ⏳ **Reseat & cold power‑cycle C/D/E cameras** (user‑side, physical). Expect all 6 to probe;
-   the dtsi/DTB already supports them — no rebuild needed, just re‑run the §5.8 verify.
-2. ⏳ **Confirm hard‑stability** — a longer soak (repeated 1080p + full‑res runs) was launched on
-   the settle=17 production DTB; fold the numbers in here. If any residual errors, try
-   `cil_settletime` 15/16/18.
-3. ⏳ **Test the Argus path** — `gst-launch-1.0 nvarguscamerasrc sensor-id=… ! …` (was "No cameras
-   available" only because the underlying capture timed out; should now enumerate).
-4. ⏳ **Pinctrl hygiene** — the `extperiph1_clk_po0` `common`‑group node still doesn't apply at boot
-   (reg stays `0x400`); MCLK is live anyway (not the blocker, §7.6.2) but make it apply for a clean
-   tree, or drop the node.
-5. ⏳ **Strip stock devkit camera graph** (§7.6.4) — `/delete-node/` the `ov23850_*`/`ov5693_*`/
-   `tca9546@70` subtree to remove the `ov23850_a@10`↔`imx219_c@10` 0x10 collision on `i2c@3180000`
-   (hygiene; CSI‑E/F bus is already clean).
-6. ⏳ **Micro‑USB OTG (§7.1a)** + **UART0 console (§7.7 item 7)** — unchanged, still open.
-7. ⏳ **Commit** the dtsi change + this README update once C/D/E + stability are confirmed.
+Captured 60 full‑res raw frames per working camera in the post‑boot good window
+(`v4l2-ctl --stream-to`), debayered with ffmpeg, and assembled
+**[`j106-camera-grid.mp4`](j106-camera-grid.mp4)** — a 2×3 grid labeled A–F with placeholders for
+missing cameras. **Camera F shows a real scene** (desk, lamp, cables — correctly exposed and
+debayered); camera A streams valid frames of a featureless gray surface (capped/blank view).
+This is end‑to‑end visual proof: sensor → D‑PHY → NVCSI → VI → DMA → debayer.
+
+Raw‑format findings needed to decode the captures (useful for any future tooling):
+- VI4 ignores the requested 1080p and always captures the **full 3264×2464** mode‑0 frame.
+- Each row has a **6656‑byte stride** (3264×2 data + padding) → frame = 16,400,384 bytes.
+- Pixels are 16‑bit LE with the 10‑bit data **left‑shifted** (values exceed 1023; NOT
+  LSB‑aligned). Per‑camera auto‑levels required before debayer
+  (`ffmpeg -pixel_format bayer_rggb16le -video_size 3328x2464` + `crop=3264:2464`).
+
+### 7.8.5 ❗ Remaining blocker: CSI link is MARGINAL (works, then wedges)
+
+The dominant remaining bug. Symptoms, all on the settle=17 production DTB:
+
+- Right after boot, captures succeed (the §7.8.4 video). After **1–N captures** (N varies), runs
+  start returning `VIDIOC_DQBUF: Input/output error` or 0 frames, with bursts of
+  `CILA_INTR_STATUS 0x89`/`0x0e0000cd` + `PXL_SOF syncpt timeout` — and the port stays broken
+  until reboot.
+- **Per‑boot / per‑port lottery:** one boot gave CSI‑A 6/6 perfect runs with **zero** errors while
+  CSI‑E failed every run; the next boot, CSI‑A failed run 1. So neither "always wedges after N"
+  nor "port X is bad" holds — classic **marginal D‑PHY timing/SI**.
+- The error codes progressed from pure LP errors (`0x89`, pre‑fix) to mixed LP+SOT+clock‑lane
+  (`0x0e0000cd`, post‑fix) — i.e. the receiver now gets much further but sync is not solid.
+- **Argus**: `nvarguscamerasrc` → **"No cameras available"** even in the good window (its startup
+  validation capture hits the same instability). The `tegra-camera-platform` table was verified
+  correct (6 modules, devnames match). Running the daemon with debug env **crashed/rebooted the
+  board** once — don't chase Argus until raw V4L2 is stable.
+
+**Next experiments for stability (in order):**
+1. **Finish the `cil_settletime` exploration properly** — soak‑test (≥10 runs/port, 2 boots) at
+   15/16/17/18; also retry auto (`0`) now that `discontinuous_clk="no"` is in. The earlier sweep
+   (§7.8.2) was under‑powered; 17 is plausible but unproven.
+2. **Lower the sensor link rate to Auvidea's TX1 values** (`PLL_VT_MPY 0x2B`, `PLL_OP_MPY 0x55` →
+   680 vs 912 MHz) via `imx219_mode_tbls.h` (kernel rebuild) + matching DT `pix_clk_hz`. Auvidea
+   shipped this slow‑down on the same carrier — likely SI headroom they found necessary. The live
+   I²C test of this was inconclusive (settle was computed for the old rate).
+3. **`DEFAULT_DPHY_CLK_SETTLE` / clock‑lane settle** — the `0x0e…` bits implicate the clock lane;
+   `csi4_fops.c` hardcodes `CLK_SETTLE` from `tegra_csi_clk_settling_time()`; try overriding.
+4. If still marginal → genuinely physical: FPC seating/length, or per‑port termination.
+
+### 7.8.6 Open steps
+
+1. ⏳ **Stability (§7.8.5)** — the main blocker; experiments listed above.
+2. ⏳ **C/D bus dead (§7.8.3)** — physical: reseat both FPCs on the i2c‑2 pair; check connector.
+3. ⏳ **Argus** — retest after stability; daemon debug crashed the board once (§7.8.5).
+4. ⏳ **Pinctrl hygiene** — `extperiph1_clk_po0` `common`‑group node still doesn't apply at boot
+   (reg stays `0x400`); MCLK is live anyway (not a blocker, §7.6.2); make it apply or drop it.
+5. ⏳ **Strip stock devkit camera graph** (§7.6.4) — `/delete-node/` `ov23850_*`/`ov5693_*`/
+   `tca9546@70` (removes the `ov23850_a@10`↔`imx219_c@10` 0x10 collision on `i2c@3180000`).
+6. ⏳ **Micro‑USB OTG (§7.1a)** + **UART0 console** — unchanged, still open.
+7. ⏳ **South‑camera/shifter quirk (§4.4)** — revisit once C/D bus is physically fixed.
 
 > Fallback always available: `extlinux` `DEFAULT j106usb` (USB working) and backup
 > `/boot/extlinux/extlinux.conf.backup-pre-j106`; partition DTB (`mmcblk0p30`) untouched.
