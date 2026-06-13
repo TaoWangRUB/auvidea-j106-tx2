@@ -1257,17 +1257,329 @@ The dominant remaining bug. Symptoms, all on the settle=17 production DTB:
    `csi4_fops.c` hardcodes `CLK_SETTLE` from `tegra_csi_clk_settling_time()`; try overriding.
 4. If still marginal → genuinely physical: FPC seating/length, or per‑port termination.
 
-### 7.8.6 Open steps
+### 7.8.6 TX1 cross‑verification — ALL 5 CAMERAS HEALTHY (2026‑06‑12)
 
-1. ⏳ **Stability (§7.8.5)** — the main blocker; experiments listed above.
-2. ⏳ **C/D bus dead (§7.8.3)** — physical: reseat both FPCs on the i2c‑2 pair; check connector.
-3. ⏳ **Argus** — retest after stability; daemon debug crashed the board once (§7.8.5).
-4. ⏳ **Pinctrl hygiene** — `extperiph1_clk_po0` `common`‑group node still doesn't apply at boot
-   (reg stays `0x400`); MCLK is live anyway (not a blocker, §7.6.2); make it apply or drop it.
-5. ⏳ **Strip stock devkit camera graph** (§7.6.4) — `/delete-node/` `ov23850_*`/`ov5693_*`/
-   `tca9546@70` (removes the `ov23850_a@10`↔`imx219_c@10` 0x10 collision on `i2c@3180000`).
-6. ⏳ **Micro‑USB OTG (§7.1a)** + **UART0 console** — unchanged, still open.
-7. ⏳ **South‑camera/shifter quirk (§4.4)** — revisit once C/D bus is physically fixed.
+Swapped the J106+M110 carrier from the TX2 to the **TX1** (with the same 5 cameras: A, C, D, E, F;
+B not installed) to confirm the hardware is not at fault. The TX1 runs the **Auvidea BSP** (L4T
+R24.2.1, kernel 3.10.96) which previously shipped as working. Access: TX1 → M110 Ethernet →
+USB‑Ethernet adapter on Dell host (10.42.0.86) → SSH hop from HP.
+
+**Result: all 5 cameras stream perfectly on the TX1 — no errors, no wedging, no per‑boot lottery.**
+
+```
+$ v4l2-ctl --list-devices
+vi-output-0, imx219 0-0010 (platform:vi:0):  /dev/video0   ← Camera A
+vi-output-2, imx219 6-0010 (platform:vi:2):  /dev/video2   ← Camera C
+vi-output-3, imx219 6-0012 (platform:vi:3):  /dev/video3   ← Camera D
+vi-output-4, imx219 2-0010 (platform:vi:4):  /dev/video4   ← Camera E
+vi-output-5, imx219 2-0012 (platform:vi:5):  /dev/video5   ← Camera F
+```
+
+Individual raw‑Bayer streaming test (5 frames per camera, all pass):
+```bash
+for v in 0 2 3 4 5; do
+  v4l2-ctl -d /dev/video$v \
+    --set-fmt-video=width=1920,height=1080,pixelformat=RG10 \
+    --stream-mmap --stream-count=5
+done
+```
+
+2×3 grid capture (5 live cameras + black PORT B placeholder, Argus ISP → H.264):
+```bash
+gst-launch-1.0 -e videomixer name=mix \
+  sink_0::xpos=0    sink_0::ypos=0 \
+  sink_1::xpos=640  sink_1::ypos=0 \
+  sink_2::xpos=1280 sink_2::ypos=0 \
+  sink_3::xpos=0    sink_3::ypos=360 \
+  sink_4::xpos=640  sink_4::ypos=360 \
+  sink_5::xpos=1280 sink_5::ypos=360 \
+! videoconvert ! omxh264enc bitrate=8000000 ! matroskamux \
+! filesink location=tx1_grid.mkv \
+  nvcamerasrc sensor-id=0 num-buffers=150 \
+    ! 'video/x-raw(memory:NVMM), width=1280, height=720' ! nvvidconv \
+    ! 'video/x-raw, width=640, height=360' \
+    ! textoverlay text="PORT A" valignment=top halignment=left font-desc="Sans, 18" \
+    ! mix.sink_0 \
+  videotestsrc num-buffers=150 pattern=black \
+    ! 'video/x-raw, width=640, height=360' \
+    ! textoverlay text="PORT B (empty)" valignment=top halignment=left font-desc="Sans, 18" \
+    ! mix.sink_1 \
+  nvcamerasrc sensor-id=2 num-buffers=150 \
+    ! 'video/x-raw(memory:NVMM), width=1280, height=720' ! nvvidconv \
+    ! 'video/x-raw, width=640, height=360' \
+    ! textoverlay text="PORT C" valignment=top halignment=left font-desc="Sans, 18" \
+    ! mix.sink_2 \
+  nvcamerasrc sensor-id=3 num-buffers=150 \
+    ! 'video/x-raw(memory:NVMM), width=1280, height=720' ! nvvidconv \
+    ! 'video/x-raw, width=640, height=360' \
+    ! textoverlay text="PORT D" valignment=top halignment=left font-desc="Sans, 18" \
+    ! mix.sink_3 \
+  nvcamerasrc sensor-id=4 num-buffers=150 \
+    ! 'video/x-raw(memory:NVMM), width=1280, height=720' ! nvvidconv \
+    ! 'video/x-raw, width=640, height=360' \
+    ! textoverlay text="PORT E" valignment=top halignment=left font-desc="Sans, 18" \
+    ! mix.sink_4 \
+  nvcamerasrc sensor-id=5 num-buffers=150 \
+    ! 'video/x-raw(memory:NVMM), width=1280, height=720' ! nvvidconv \
+    ! 'video/x-raw, width=640, height=360' \
+    ! textoverlay text="PORT F" valignment=top halignment=left font-desc="Sans, 18" \
+    ! mix.sink_5
+```
+
+Output: [`tx1_grid.mkv`](tx1_grid.mkv) (4.4 MB, 1920×720, 5 sec) — all 5 views show real scenes,
+debayered, no artifacts. Also saved per‑camera single capture:
+[`tx1_cam_a.mkv`](tx1_cam_a.mkv) (1.7 MB, 1920×1080, 5 sec).
+
+**Conclusion: the cameras, FPCs, connectors, and J106 carrier are all healthy.** The TX2's CSI
+marginal‑link problem (§7.8.5) is **definitively a TX2 software/DT issue**, not hardware. This also
+confirms the **C/D bus** (i2c‑6 on TX1 = i2c‑2 on TX2) works — the "dead bus" seen on TX2 (§7.8.3)
+was caused by connector seating when swapping modules, not a camera or carrier fault.
+
+Notable TX1‑vs‑TX2 difference from the history: the TX1 uses **`nvcamerasrc`** (the R24 Argus
+element) — not `nvarguscamerasrc` (R32 name). No `discontinuous_clk` or `cil_settletime` tuning
+was ever needed on TX1, confirming the TX1 CSI receiver does not police D‑PHY LP sequences.
+
+### 7.8.7 ✅ CSI STABILITY FIX — lower MIPI data rate (2026‑06‑12)
+
+**Root cause identified and fixed.** The NVIDIA R32.7.6 `imx219_mode_tbls.h` PLL values produce
+**912 Mbps/lane** MIPI serial rate — exactly matched to the pixel data rate with **zero margin**.
+On the J106 carrier's CSI traces (longer/more complex routing than the devkit), this marginal rate
+causes intermittent CRC errors (`INTR_STATUS 0x4`/`0x8` = payload CRC error / word‑count short)
+and frame corruption on the TX2 NVCSI receiver. TX1's simpler CSI receiver tolerates the same
+traces because it never polices D‑PHY LP sequences and has different timing margins.
+
+**Analysis path:**
+1. cil_settletime experiments (17 → 0/auto=22): **no effect** — same CRC errors. Not a settle
+   time issue.
+2. Driver source code audit (`csi4_fops.c`): `T18X_BYPASS_LP_SEQ` is correctly set for all ports
+   (both CIL_A and CIL_B). Per‑port config path is correct. Not a driver bug.
+3. PLL analysis: `PLL_VT_MPY=0x39(57)`, `PLL_OP_MPY=0x72(114)` → MIPI serial rate =
+   `24 × 114 / 3 = 912 Mbps/lane`. Pixel data rate = `182.4 Mpix/s × 10b / (2 lanes × 8) =
+   114 MB/s/lane = 912 Mbps/lane`. **Zero margin.**
+
+**Fix (kernel rebuild required):** Reduce PLL multipliers in
+`drivers/media/i2c/imx219_mode_tbls.h`:
+
+| Register | Stock | Fixed | Effect |
+|----------|-------|-------|--------|
+| `0x0307` PLL_VT_MPY | `0x39` (57) | `0x2B` (43) | lower pixel clock |
+| `0x030D` PLL_OP_MPY | `0x72` (114) | `0x55` (85) | 680 Mbps/lane (−25%) |
+
+Also update `pix_clk_hz` in the DT from `"182400000"` to `"136000000"` to match (used for settle
+time auto‑calculation). Framerate drops proportionally (~22 fps for 1080p, was ~30 fps).
+
+**Soak test results (cil_settletime=0, lower MIPI rate):**
+
+```
+Camera  Device       I2C probe  Streaming  Notes
+A       video0 1-0010  OK        200/200 ✅  zero dmesg errors
+B       —      1-0012  -121 NACK  —         never probes (address shifter)
+C       video1 2-0010  OK        200/200 ✅  zero dmesg errors
+D       video2 2-0012  model=00   0/50 ❌   sensor not configured (I2C)
+E       video3 7-0010  OK        200/200 ✅  zero dmesg errors
+F       video4 7-0012  OK        200/200 ✅  benign CIL err on stop only
+```
+
+A/C/E/F: 5 runs × 10 frames × 4 cameras = 200 frames, **100% success, zero errors.**
+
+**Cross‑check against Auvidea TX1 BSP** (`/tmp/tx1src/patch_sources/0001-add-imx219-subdevice-driver.patch`):
+Auvidea's production TX1 kernel uses `PLL_VT_MPY=0x2B`, `PLL_OP_MPY=0x55` (680 Mbps/lane) for all
+modes except full‑res 3264×2464 (left at stock 912 Mbps). **Our fix independently arrived at the
+same values**, confirming Auvidea hit the same J106 SI issue and solved it the same way.
+
+**Remaining I2C issues (separate from CSI):**
+- Camera B (1-0012): consistent `-121` NACK at probe. The J106 address shifter on i2c-1 may not
+  work for address `0x12` with the TX2 I2C controller (works on TX1).
+- Camera D (2-0012): intermittent "invalid sensor model id: 00" — the I2C read succeeds but
+  returns garbage. Probe takes 5.6 s (stuck in retries). Sensor binds but is not properly
+  configured → no CSI output → syncpt timeout. Camera C (same bus, base address 0x10) works fine.
+
+### 7.8.9 ✅ Camera D FIXED — stock I2C mux nodes were the blocker (2026‑06‑12)
+
+Camera D (`2‑0012`) failed probe with `-121` (I²C NACK) on every boot since the PLL fix (§7.8.7).
+Camera B (`1‑0012`) had the same symptom but has no camera physically connected.
+
+**Root cause:** the stock devkit DTB contains **PCA9546/PCA9548 I²C mux** nodes on the same buses
+the J106 address shifter uses. Even with `status = "disabled"`, these nodes interfered with the
+J106's hardware address shifter, preventing the shifted address `0x12` from responding:
+
+| Bus | Stock node | Address | Effect on J106 |
+|-----|-----------|---------|----------------|
+| i2c‑2 (`3180000`) | `tca9546@70` | 0x70 | shifter confused → 0x12 dead |
+| i2c‑2 (`3180000`) | `tca9548@77` | 0x77 | shifter confused → 0x12 dead |
+| i2c‑1 (`c240000`) | `i2cmux@70` | 0x70 | shifter confused → 0x12 dead |
+| i2c‑7 (`c250000`) | *(none)* | — | shifter works → 0x12 OK |
+
+**Correlation:** i2c‑7 (CSI‑E/F) had **no** stock mux nodes and both `0x10` + `0x12` always worked.
+Buses 1 and 2 had mux nodes and only `0x10` worked.
+
+**Fix:** `/delete-node/` all stock mux and camera nodes in the dtsi:
+```dts
+i2c@3180000 {
+    /delete-node/ tca9546@70;
+    /delete-node/ tca9548@77;
+    /delete-node/ ov23850_a@10;
+    /delete-node/ ov5693_c@36;
+};
+i2c@c240000 {
+    /delete-node/ i2cmux@70;
+    /delete-node/ ov23850_c@36;
+};
+```
+
+**Diagnostics tried (for reference):**
+- I²C clock 400 kHz → 100 kHz: no effect (shifter still didn't respond)
+- Removing `tca9546@70` only: no effect (`tca9548@77` was the remaining culprit on i2c‑2)
+- Removing **all** stock mux nodes: **fixed it**
+
+**Soak test after fix: 50/50 captures across 5 cameras, zero errors, zero dmesg CSI/VI errors.**
+
+```
+$ v4l2-ctl --list-devices
+vi-output, imx219 1-0010 (platform:15700000.vi:0):  /dev/video0   ← Camera A
+vi-output, imx219 2-0010 (platform:15700000.vi:2):  /dev/video1   ← Camera C
+vi-output, imx219 2-0012 (platform:15700000.vi:3):  /dev/video2   ← Camera D ✅ FIXED
+vi-output, imx219 7-0010 (platform:15700000.vi:4):  /dev/video3   ← Camera E
+vi-output, imx219 7-0012 (platform:15700000.vi:5):  /dev/video4   ← Camera F
+```
+
+### 7.8.10 ◑ Argus partially working — enumerates all cameras, buffer export broken (2026‑06‑12) — ⚠️ ROOT‑CAUSED & FIXED in §7.9
+
+`nvarguscamerasrc` now **sees and opens all 5 cameras** (sensor‑id 0–4). The fix required two
+additions to the `tegra-camera-platform` modules:
+1. **`status = "okay"`** on every module and drivernode — the stock devkit modules are
+   `status = "disabled"` and DTS overlay merges inherit that, silently disabling our modules.
+2. **`drivernode1`** with `pcl_id = "v4l2_lens"` pointing to a `j106_lens_imx219@J106` lens
+   descriptor node (RPi Camera v2: fixed‑focus, f/2.0, 3.04 mm).
+
+**What works:** `nvarguscamerasrc sensor-id=N ... ! fakesink` succeeds for all 5 cameras.
+The `CameraProvider` enumerates 2 modes (3264×2464@21, 1920×1080@30) per sensor.
+
+**What doesn't work:** any pipeline that reads the NVMM output buffer (`nvvidconv`, `nvv4l2h264enc`,
+`omxh264enc`, `nvjpegenc`) fails immediately with `nvbuf_utils: Can not get HW buffer from FD`.
+The dmabuf FD returned by Argus cannot be mapped by downstream elements. This is a platform‑level
+buffer‑sharing issue (not a DT problem) — possibly a JetPack/L4T library mismatch or a missing
+`NvBufferCreateEx` path. The ISP processes frames correctly (proven by `fakesink` receiving them),
+but the exported FDs are invalid for the video encoder/converter.
+
+**Workaround:** raw V4L2 capture (`v4l2-ctl --stream-to`) works reliably for all cameras. Use ffmpeg
+with `bayer_rggb16le` debayer + `histeq` for post‑processing. See
+[`tx2_grid_5cam.mkv`](tx2_grid_5cam.mkv) (2×3 grid, 5 live cameras, raw→ffmpeg path).
+
+### 7.8.11 Open steps (updated 2026‑06‑12)
+
+**5 of 6 cameras working** (A, C, D, E, F). Camera B has no module connected. Remaining work:
+
+1. ⏳ **Argus NVMM buffer export** — investigate `nvbuf_utils` FD mapping failure. Possible fixes:
+   check JetPack multimedia library versions, try `NvBufferTransform` API directly, or test
+   `jetson_multimedia_api` samples instead of GStreamer.
+2. ⏳ **Fine‑tune MIPI rate** — current 688 Mbps/lane is conservative. Binary‑search between 688
+   and 912 to find the maximum reliable rate and recover framerate.
+3. ⏳ **Pinctrl hygiene** — `extperiph1_clk_po0` not applied at boot (not a blocker).
+4. ⏳ **Micro‑USB OTG (§7.1a)** + **UART0 console** — unchanged.
+5. ⏳ **Camera B** — connect a 6th camera module to CSI‑B; should work now that `i2cmux@70` is
+   deleted from i2c‑1.
 
 > Fallback always available: `extlinux` `DEFAULT j106usb` (USB working) and backup
 > `/boot/extlinux/extlinux.conf.backup-pre-j106`; partition DTB (`mmcblk0p30`) untouched.
+
+## 7.9 ✅ ARGUS / ISP PIPELINE WORKING — `nvbuf_utils` FD error root‑caused (2026‑06‑13)
+
+The §7.8.10 "NVMM buffer export broken" failure (`nvbuf_utils: Can not get HW buffer from FD...
+Exiting...`) was **never a buffer‑export bug**. It was a **device‑tree sensor‑mode mismatch** that
+made the VI fault on every frame, so the ISP never produced an output buffer — the FD came back
+`-1` and `nvbuf_utils` (correctly) refused to map it. With the cameras fixed, **single‑camera Argus
+now runs flawlessly** end‑to‑end including the hardware H.264 encoder.
+
+#### The two root causes (both in `tegra186-camera-j106-imx219.dtsi`)
+
+**1. DT mode index ≠ kernel driver table index.**
+The DT defined only **2** modes (`mode0`, `mode1`), but the R32 `imx219` driver's
+`imx219_mode_tbls.h` has **5** register tables (3264×2464, 3264×1848, 1920×1080, 1280×720@60,
+1280×720@120). Argus selects a sensor mode by its **DT index** and passes that index straight to
+the kernel driver (`use_sensor_mode_id`), which uses it to index the **register table array**.
+So when Argus requested 1080p (DT `mode1`), the driver programmed table[1] = **3264×1848** into the
+sensor. The sensor then emitted lines wider than the VI was configured for:
+
+```
+NvViErrorDecode CaptureError: ChanselFault (4)
+ChanselFault : 0x00000100
+    PIXEL_LONG_LINE [8]: 1   (a line exceeds FRAME_X_WIDTH; truncated)
+```
+
+Every capture aborted after frame 2 → ISP idle → `dmabuf_fd -1`.
+
+**2. DT framerates exceeded the lowered MIPI PLL.**
+The §7.8.7 stability fix lowered the sensor PLL to **680 Mbps/lane** (`PLL_OP_MPY 0x72→0x55` in
+`imx219_mode_tbls.h`), i.e. **136 Mpix/s**. But the DT still advertised the **stock 21/30 fps**.
+Argus believed the sensor was faster than it was and programmed a `frame_length` (total lines per
+frame) **shorter than the actual frame**, so the frame‑end packet arrived before all pixels:
+
+```
+NvViErrorDecode CaptureError: ChanselShortFrame (7)
+    PIXEL_INCOMPLETE / PIXEL_SHORT_FRAME
+```
+
+This is also why **raw V4L2 full‑res tops out at ~16 fps** — that is the true frame rate at
+136 Mpix/s, not a bug.
+
+#### The fix
+
+`tegra186-camera-j106-imx219.dtsi` now defines **all 5 modes in driver‑table order**
+(`mode0`…`mode4`) with **derated framerates** computed from the lowered pixel clock
+(`pix_clk_hz / (line_length · fps) ≥ frame_length_floor`):
+
+| DT mode | resolution | max fps | notes |
+|--------:|-----------|--------:|-------|
+| mode0 | 3264×2464 | 15 | full res |
+| mode1 | 3264×1848 | 20 | |
+| mode2 | 1920×1080 | 30 | the common Argus target |
+| mode3 | 1280×720 (2×2 bin) | 44 | |
+| mode4 | 1280×720 (hi‑rate bin) | 110 | **register table still 816 Mbps** — caution if marginal |
+
+#### Verified on hardware (boot label `j106cam`, `Image.j106` + `/boot/tegra186-j106-modes.dtb`)
+
+- **All 5 cameras (video0–4)**: `nvarguscamerasrc sensor-id=N` 1080p30, 150 frames, **zero errors,
+  exact realtime**.
+- **Full HW pipeline works**: `nvarguscamerasrc ! nvvidconv ! nvv4l2h264enc ! h264parse ! qtmux !
+  filesink` produces a valid `.mp4` (the §7.8.10 NVMM path that used to fail).
+- Argus enumerates all 5 modes with the correct derated rates.
+
+#### Red herrings disproven
+
+- **ISP clock at 115.2 MHz is fine** for single‑camera capture. The earlier theory that the BPMP
+  resets the ISP clock after `finalize_poweron` is real, but `tegra_camera_platform.c` re‑sets the
+  clock at **stream‑on** (after runtime‑resume) anyway, so it never matters. **Patch
+  `0002-nvhost-acm-restore-clock-rate-on-enable.patch` is unnecessary** and should be dropped or
+  kept only as a documented dead‑end.
+- **The CSI link is NOT marginal.** NVCSI error registers (`INTR_STATUS`, `ERR_INTR_STATUS`,
+  `CILA_*`, `ERROR_STATUS2VI_*`) read **all‑zero** throughout a healthy V4L2 stream. The §7.8.5
+  "wedge after Argus" was the VI being left in a broken state by the *aborted* Argus captures
+  (cause #1/#2 above), not a physical‑layer fault.
+
+#### Debugging techniques worth remembering
+
+- **Foreground daemon with verbose logs** — the single most useful tool. Stop the service and run:
+  ```bash
+  sudo systemctl stop nvargus-daemon
+  sudo bash -c 'enableCamScfLogs=1 enableCamPclLogs=1 nvargus-daemon'
+  ```
+  This prints `NvViErrorDecode` / `ChanselFault` decodes and the VI/CSI debug‑register dump that
+  named both faults above. Without it the failure is just an opaque `dmabuf_fd -1`.
+- **BPMP clock force‑lock** for clock experiments:
+  `echo <hz> | sudo tee /sys/kernel/debug/bpmp/debug/clk/<clk>/rate` then
+  `echo 1 | sudo tee /sys/kernel/debug/bpmp/debug/clk/<clk>/mrq_rate_locked` (resets at reboot).
+- ⚠️ **Never `busybox devmem` the NVCSI registers without an active stream** — those registers are
+  clock‑gated; a read while gated **hung the bus and watchdog‑rebooted the board**.
+- **VI recovery is reboot‑only.** Once Argus wedges the VI, `v4l2-ctl` also hangs. Driver
+  unbind/rebind does **not** work: `tegra-vi4` refuses unbind, and `nvcsi` unbind leaks its `acm`
+  kobject so re‑probe fails (`kobject_add … -EEXIST`, `probe … failed with error -5`). Reboot.
+
+#### Still open — multi‑camera Argus contention
+
+Single‑camera is perfect; **simultaneous** Argus sessions degrade: 5× 1080p30 → ~6 fps each; a
+clean 2‑camera run gave one camera ~14 fps and the other a `TIMEOUT`. It is **not** clock‑bound
+(force‑locking VI=409.6 MHz / ISP=768 MHz via BPMP changed nothing) and **not** CPU‑bound (95 %
+idle). Leading hypothesis: per‑frame exposure/gain **I²C writes contend** on shared buses
+(A+B share i2c‑1, C+D share i2c‑2, E+F share i2c‑7). Next discriminator: A+E (different buses) vs
+A+B (same bus); and a single multi‑session libargus app vs N separate `gst-launch` processes.
