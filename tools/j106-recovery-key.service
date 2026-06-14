@@ -1,0 +1,11 @@
+[Unit]
+Description=J106/M110 recovery button -> forced recovery (hold >=1.5s)
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/j106-recovery-key.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

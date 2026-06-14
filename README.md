@@ -614,37 +614,41 @@ stock `Image` are never modified.
 - **Cameras** — all wired sensors stream raw V4L2 and through Argus; aliasing fixed (Stage 5.4);
   **5‑camera Argus grid** delivered ([`captures/tx2_grid_5cam.mp4`](captures/tx2_grid_5cam.mp4)).
 - **UART0 debug console** — works: `/dev/ttyUSB0` @ 115200 8N1 on the host (FTDI on the debug header).
+- **Micro‑USB recovery / flashing (M110 J17)** — works. `sudo reboot forced-recovery` (or the M110 recovery
+  button via `tools/j106-recovery-key`) puts the board into RCM and the host enumerates it as
+  `0955:7c18 NVIDIA Corp. T186 [TX2 Tegra Parker] recovery mode` (verified). The M110 PDF calls J17 the
+  *"USB 2.0 port for firmware upgrades"* — flashing is its actual purpose.
+- **Carrier buttons** — all functional; verified map below. The M110 "Recovery" button now triggers software
+  recovery via [`tools/j106-recovery-key`](tools/).
+
 ### ◑ Intermittent (hardware/Argus quirks, not config bugs)
 - **South cameras B/D (`0x12`) per‑boot enumeration lottery** — Stage 1 caveat. D comes up some boots,
   not others; recovered by reboot. B has no physical sensor.
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
-### ❌ Open
-- **Micro‑USB device mode on the M110 (`/dev/ttyACM0` gadget) — configured but does not enumerate.** This is
-  USB0/OTG (J106 → M110 **J17**), *separate* from UART0. `override-usb.dtsi` forces `usb2-0 mode="device"`,
-  and verified on the board the gadget binds (`acm.GS0` + `rndis/ncm` + `mass_storage` on UDC
-  `3550000.xudc`, `/dev/ttyGS0` present). **But it never goes online on a host** — dmesg shows
-  `tegra-xudc 3550000.xudc: vbus state: 0` and `extcon@1: USB_HOST=1`: the OTG ID/VBUS detect (stock devkit
-  GPIOs, floating on the M110) reads the port as **host** and xudc never sees the host's VBUS, so it stays in
-  ELPG. With the micro‑USB connected to a PC, the host sees nothing. This is the §7.1a **M110 OTG‑routing
-  limitation** (host VBUS not routed to a Tegra VBUS sense, ID not floated to B‑device), confirmed at register
-  level — not a software bug. Forcing pure‑device by removing xudc's `extcon`/`otg-controller` breaks the
-  padctl (`failed to setup XUSB ports: -517`), so it is not done. *When it does work* (a devkit‑wired
-  micro‑USB such as the **XCB‑Lite**, "function identical to devkit"), it enumerates as **`/dev/ttyACM0`** +
-  `192.168.55.1` — **not** `ttyS0` (that's UART0). Remaining options: route the M110 host VBUS to the Tegra
-  VBUS sense + float ID (hardware), or use the XCB‑Lite micro‑USB.
-- **Carrier buttons — VERIFIED, all functional (nothing to fix).** Per‑button live test (2026‑06‑14) with a
-  reliable evdev reader on the `gpio-keys` node (`event4`) + GPIO‑state watch:
-  - **J106 power → `gpio-312` → `KEY_POWER`** (3/3 clean press+release). Works → triggers OS shutdown with the
-    default `logind HandlePowerKey=poweroff`.
-  - **M110 power → no `gpio-keys` event** → it's the **PMIC (MAX77620) ONKEY**: hardware power control (powers
-    the board **on** when off; **force‑off** on a long hold). Not a software key — nothing to remap.
-  - **Reset (J106 & M110) → `SYS_RESET_N`** — hardware reset (confirmed: LED blinks).
-  - **Recovery (J106 & M110) → bootrom `FORCE_RECOVERY`** — no runtime event; acts only when **held during
-    boot** (to enter recovery for flashing). Normal.
-  So every button does its designed job. (Earlier notes of `KEY_VOLUMEUP`/gpio‑313 were a capture‑process
-  artifact — corrected here. The `gpio-keys` node still carries the stock devkit `volume_up/down` entries on
-  gpio‑313/314, which are simply unused on this carrier.)
+### ❌ Open / hardware‑limited
+- **Micro‑USB Linux device‑mode gadget (`/dev/ttyACM0` / `192.168.55.1`) — will NOT work on M110 J17.** This is
+  USB0/OTG (J106 → M110 **J17**), *separate* from UART0 (and *separate* from recovery, which **does** work —
+  see Working). Per the M110 PDF, J17 is a **host‑leaning port**: `USB0_ID` floats → host, and `USB0_VBUS` is
+  tied to the M110's own 5 V output. `override-usb.dtsi` `usb2-0 mode="device"` binds the L4T gadget
+  (`acm.GS0`+`rndis/ncm`+`mass_storage` on UDC `3550000.xudc`, `/dev/ttyGS0` present) but it **never goes
+  online**: dmesg `tegra-xudc 3550000.xudc: vbus state: 0` + `extcon@1: USB_HOST=1` (host VBUS not sensed) →
+  xudc stays in ELPG, host sees nothing. Confirmed at register level — **hardware wiring, not a software bug**
+  (forcing pure‑device by stripping xudc's `extcon`/`otg-controller` breaks the padctl with `-517`). It would
+  enumerate on a devkit‑wired micro‑USB (e.g. **XCB‑Lite**). *Recovery/flashing over the same J17 works fine
+  (Working) — that is what the port is for.*
+
+### Carrier buttons — verified map (live per‑button test, 2026‑06‑14)
+| Button | Wiring (measured) | Behaviour |
+|---|---|---|
+| **J106 power** | Tegra `gpio-312` → `KEY_POWER` (+ module `POWER_BTN`) | ✅ powers the board on; shuts down a running board (`logind HandlePowerKey=poweroff`) |
+| **M110 power** | PMIC `POWER_BTN` (B50) — **not on any GPIO**; all‑GPIO scan saw nothing on press, and it never powers on | ❌ electrically dead on this stack — **hardware** (not remappable). Use the J106 power button. |
+| **M110 recovery** | Tegra `gpio-313` → `KEY_VOLUMEUP` (a plain GPIO — **not** the bootrom `FORCE_RECOVERY` strap) | by itself a no‑op; with [`tools/j106-recovery-key`](tools/) a **≥1.5 s hold** runs `reboot forced-recovery` → **RCM** (verified) |
+| **Reset** (J106 / M110) | `SYS_RESET_N` | ✅ hardware reset (LED blinks) |
+
+`reboot forced-recovery` is supported by the t18x kernel (`reboot-t18x.c`). Because the M110 "Recovery" button
+is wired to a GPIO (not `FORCE_RECOVERY`), it cannot enter recovery on its own — the `tools/j106-recovery-key`
+systemd service bridges it (hold ≥1.5 s → software RCM). Tap **Reset** (no hold) to leave recovery.
 
 ### Notes
 - Detailed chronological bring‑up investigation (every dead‑end, symptom, and the reasoning that led to
