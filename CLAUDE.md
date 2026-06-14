@@ -11,10 +11,10 @@ driver patch** on top of the already-installed **L4T R32.7.6** (kernel `4.9.337-
 downgrade. The deliverables are a `.dtsi`, a `.patch`, and a build/deploy procedure — there is no
 code to "run" locally; everything is cross-built here and deployed to the board over SSH.
 
-**`README.md` is the authoritative, continuously-updated project log.** Read it first — especially
-**§7 (bring-up progress)** for current state, and **§5–5a** for the validated build/flash workflow.
-Most "where do I start" questions are answered there in more depth than here. Keep README.md
-updated as the source of truth when state changes.
+**`README.md` is the authoritative project reference.** Read it first — **§5** (camera bring-up:
+issues & fixes by pipeline stage), **§6** (build, apply patch & flash), **§7** (status & open issues).
+The detailed chronological investigation log lives in this file's git history. Keep README.md updated
+as the source of truth when state changes.
 
 ## Repo layout (the files that matter)
 
@@ -63,7 +63,7 @@ sensor (imx219 @0x10/0x12) --remote-endpoint--> nvcsi@150c0000 channel@N --> vi@
   `status="okay"` or there is no `/dev/video*`.
 
 When editing `tegra186-camera-j106-imx219.dtsi`, these facts (buses, gpio, MCLK, okay-status) are
-load-bearing and cross-checked against live hardware in README §3b/§4/§7 — change them only with a
+load-bearing and cross-checked against live hardware in README §3b/§4/§5 — change them only with a
 documented reason.
 
 ## Build & deploy workflow
@@ -72,7 +72,7 @@ Builds happen on an **x86-64 Linux host** (this repo machine); artifacts deploy 
 over SSH**. Deployment is **always reversible** via `extlinux.conf` LABELs — the partition DTB
 (`mmcblk0p30`) is never touched.
 
-> ⚠️ **Path discrepancy to be aware of:** README §5a uses
+> ⚠️ **Path discrepancy to be aware of:** README §6 uses
 > `/home/taowang/workspace/auvidea-j106-tx2/j106build/` (this repo), while `build-dtb.sh` and the
 > memory notes reference `/tmp/j106build/` on a separate WSL host. Confirm which build tree exists
 > before running anything; prefer the in-repo `j106build/`.
@@ -103,11 +103,11 @@ dtc -I dts -O dtb -@ -o tegra186-j106.dtb tegra186-j106.dts 2> tegra186-j106.dtc
 # dtc phandle/unit-address warnings are expected for decompiled+recompiled trees.
 ```
 (**Approach B** builds from NVIDIA DTS sources via `tx2-j106-6csi/build-dtb.sh in.dts out.dtb` —
-see README §5a.)
+see README §6.)
 
 **Deploy reversibly** (copy `Image`→`/boot/Image.j106`, DTB→`/boot/tegra186-j106.dtb`, add an
-`extlinux` `LABEL j106cam` pointing at them, keep `LABEL j106usb` as fallback, set `DEFAULT
-j106cam`, reboot). Full commands and rollback are in README §5a.
+`extlinux` `LABEL j106cam` pointing at them, keep a prior `LABEL` as fallback, set `DEFAULT
+j106cam`, reboot). Full commands and rollback are in README §6.
 
 **Board access — always confirm the active connection interface first.** The TX2 has been reached
 several ways across sessions and the address depends on which is in use, so never assume a cached
@@ -115,7 +115,7 @@ IP. Check which interface is actually carrying the link before connecting:
 - **M110 Ethernet (`eth0`)** — host-shared net puts the board on `10.42.0.x` (rediscover via
   `ip neigh show dev <usb-eth-iface>` or a ping sweep); an older direct LAN gave `192.168.0.168`.
 - **Micro-USB device-mode gadget** — `192.168.55.1` (and `/dev/ttyACM*` on the host) after
-  first-boot; currently unreliable (the §7.1a OTG issue).
+  first-boot; currently not enumerating (the OTG device-mode issue, README §7 Open).
 - **WiFi** — its own DHCP lease on the WiFi subnet.
 - **Debug UART** (`/dev/ttyUSB0`, 115200 8N1) — the reliable serial fallback when no IP responds.
 
@@ -124,15 +124,16 @@ live IP and interface each session.
 
 ## Current status & where the work is stuck
 
-USB host ports are **done & verified**. Cameras **capture real images end-to-end** (see
-`j106-camera-grid.mp4` and README §7.8) after three dtsi fixes: `embedded_metadata_height="2"`
-(SMMU fault), **`discontinuous_clk="no"`** (the key fix — t186 NVCSI polices D-PHY LP sequences
-unless bypassed; TX1 never did, which is why TX1 "just worked"), and `cil_settletime="17"`
-(unconfirmed). The MCLK-pinmux theory in §7.6.2 was a red herring — disproven live.
+USB host ports **done & verified**. Cameras **work end-to-end** — raw V4L2 and Argus, all distinct.
+Key dtsi fixes (README §5): `embedded_metadata_height="2"` (SMMU), **`discontinuous_clk="no"`** (the
+streaming fix — t186 NVCSI polices D-PHY LP sequences unless bypassed; TX1 never did), 680 Mbps MIPI
+rate (patch `0001`, marginal-link margin, matches Auvidea TX1), all-5-modes in driver order + derated
+framerates (Argus ISP), and **unique `position` per module** (the Argus `sensor-id` aliasing fix —
+identical EEPROM-less IMX219 all collapsed to `(GUID 0, position 0)` → one camera). Deliverable:
+`captures/tx2_grid_5cam.mp4` (5-camera 2×3 grid, TX1 parity).
 
-**Current blocker: the CSI link is marginal** — captures work after boot, then wedge
-(`VIDIOC_DQBUF` I/O errors, `CILA_INTR_STATUS 0x0e0000cd`) until reboot; per-boot/per-port
-lottery. Next experiments are ranked in README §7.8.5 (settle soak-test, Auvidea's lower link
-rate via `imx219_mode_tbls.h`, clock-lane settle). Separately, the C/D camera pair's I²C bus
-(`3180000`) is physically dead (reseat needed), and Argus reports "No cameras available" until
-the link is stable. When resuming, start at README §7.8.5–7.8.6.
+**Open issues (README §7):** (1) micro-USB device-mode (`/dev/ttyACM0` gadget, *not* `ttyS0`) not
+enumerating — staged `override-usb.dtsi` `mode="device"` fix unverified; (2) carrier buttons not
+working (uninvestigated `gpio-keys`); (3) UART0 debug console **works** (`/dev/ttyUSB0` @115200).
+Intermittent (not bugs): south `0x12` cameras (B/D) per-boot enumeration lottery; Argus 5-session
+start race (restart `nvargus-daemon` + retry). Board sudo: `echo nvidia | sudo -S <cmd>`.
