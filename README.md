@@ -633,16 +633,18 @@ stock `Image` are never modified.
   micro‑USB such as the **XCB‑Lite**, "function identical to devkit"), it enumerates as **`/dev/ttyACM0`** +
   `192.168.55.1` — **not** `ttyS0` (that's UART0). Remaining options: route the M110 host VBUS to the Tegra
   VBUS sense + float ID (hardware), or use the XCB‑Lite micro‑USB.
-- **Carrier buttons — VERIFIED working (it's a key‑mapping issue, not broken hardware).** Live test
-  (2026‑06‑14): watched the GPIO lines + the `gpio-keys` event node (`event4`) while the user pressed the
-  J106/M110 buttons — captured **4× `KEY_POWER` + 4× `KEY_VOLUMEUP`** as real input events. So the buttons are
-  electrically fine and reach the OS; they're wired to the Tegra pins the **stock devkit DT labels**:
-  - **gpio‑312 → `KEY_POWER`** — works; normally triggers OS shutdown (`logind HandlePowerKey=poweroff`).
-  - **gpio‑313 → `KEY_VOLUMEUP`** — a **no‑op on a headless system**, which is why that button *looks* dead.
-  - **Reset / Recovery** are hardware: `SYS_RESET_N` (reset works — LED blinks) and bootrom `FORCE_RECOVERY`
-    (acts only when held during boot, for flashing) — not runtime `gpio-keys`, no recovery GPIO at runtime.
-  So nothing is broken. *Optional polish:* if you want the `KEY_VOLUMEUP` button to do something useful on a
-  headless rig, remap its `linux,code` in the `gpio-keys` node (e.g. to `KEY_POWER`/`KEY_RESTART`) in the dtsi.
+- **Carrier buttons — VERIFIED, all functional (nothing to fix).** Per‑button live test (2026‑06‑14) with a
+  reliable evdev reader on the `gpio-keys` node (`event4`) + GPIO‑state watch:
+  - **J106 power → `gpio-312` → `KEY_POWER`** (3/3 clean press+release). Works → triggers OS shutdown with the
+    default `logind HandlePowerKey=poweroff`.
+  - **M110 power → no `gpio-keys` event** → it's the **PMIC (MAX77620) ONKEY**: hardware power control (powers
+    the board **on** when off; **force‑off** on a long hold). Not a software key — nothing to remap.
+  - **Reset (J106 & M110) → `SYS_RESET_N`** — hardware reset (confirmed: LED blinks).
+  - **Recovery (J106 & M110) → bootrom `FORCE_RECOVERY`** — no runtime event; acts only when **held during
+    boot** (to enter recovery for flashing). Normal.
+  So every button does its designed job. (Earlier notes of `KEY_VOLUMEUP`/gpio‑313 were a capture‑process
+  artifact — corrected here. The `gpio-keys` node still carries the stock devkit `volume_up/down` entries on
+  gpio‑313/314, which are simply unused on this carrier.)
 
 ### Notes
 - Detailed chronological bring‑up investigation (every dead‑end, symptom, and the reasoning that led to
