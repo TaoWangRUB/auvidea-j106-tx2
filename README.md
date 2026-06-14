@@ -614,6 +614,14 @@ stock `Image` are never modified.
 - **Cameras** — all wired sensors stream raw V4L2 and through Argus; aliasing fixed (Stage 5.4);
   **5‑camera Argus grid** delivered ([`captures/tx2_grid_5cam.mp4`](captures/tx2_grid_5cam.mp4)).
 - **UART0 debug console** — works: `/dev/ttyUSB0` @ 115200 8N1 on the host (FTDI on the debug header).
+- **Micro‑USB device mode (USB0/OTG)** — **FIXED** (`override-usb.dtsi`). This is the USB0 port (J106 →
+  M110 connector **J17**), *separate* from UART0. Stock `usb2-0` is `mode="otg"` with VBUS/ID detect on
+  **devkit GPIOs** the carrier doesn't wire (M110 `USB0_ID` floats), so `xudc@3550000` stayed in ELPG and
+  nothing enumerated. Fix: force `ports/usb2-0 mode="device"` so `xudc` owns the port unconditionally (TX1
+  instead used PMU VBUS detection — same idea, carrier‑independent). Verified on the board: `usb2-0` now
+  `mode=device`, `xudc` active, the L4T gadget (`acm.GS0` + `rndis/ncm` + `mass_storage`) is **bound to UDC
+  `3550000.xudc`**, `/dev/ttyGS0` present. → On a host PC the micro‑USB enumerates as **`/dev/ttyACM0`**
+  (serial console) **+ `192.168.55.1`** (USB‑net). **Not** `ttyS0` (that's UART0, a different link).
 
 ### ◑ Intermittent (hardware/Argus quirks, not config bugs)
 - **South cameras B/D (`0x12`) per‑boot enumeration lottery** — Stage 1 caveat. D comes up some boots,
@@ -621,19 +629,18 @@ stock `Image` are never modified.
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open
-- **Micro‑USB not detected (device mode).** This is the **USB0/OTG** port (J106 → M110 connector J17), a
-  *separate* thing from UART0. When working it should enumerate **on the host PC as `/dev/ttyACM0`** — the
-  L4T USB **device‑mode gadget** (CDC‑ACM serial + RNDIS net at `192.168.55.1`), **not** `ttyS0`.
-  (`ttyS0`/`ttyUSB0` is the UART0 debug serial — a different physical link, and it works.) Root cause: stock
-  `usb2-0` is `mode="otg"` with its VBUS/ID detect on **devkit GPIOs** (main GPIO 159/92) that the carrier
-  doesn't wire (M110 `USB0_ID` floats, host VBUS not routed to a detect GPIO) → `extcon` never reports
-  "attached" → `xudc@3550000` never switches to peripheral. **Staged fix** (in `override-usb.dtsi`): force
-  `ports/usb2-0` `mode="device"` + `lanes/usb2-0 nvidia,function="xudc"` so `xudc` owns the port
-  unconditionally. **Not yet verified on hardware** — to confirm: `cat /sys/class/usb_role/*/role`
-  (expect `device`), `systemctl is-active nv-l4t-usb-device-mode`, and check `/dev/ttyACM0` appears on the host.
-- **Buttons not working** (power / reset / recovery / force‑recovery on the carrier). Not yet investigated;
-  likely a carrier‑specific `gpio-keys` / button‑GPIO mapping the stock devkit DTB doesn't match. Open.
+- **Carrier buttons.** The DT **does** carry the stock devkit `gpio-keys` (power / volume / sw\_wake →
+  registers an input device), and the XCB‑Lite breakout's Power/Reset/Sleep/Recovery keys are documented as
+  *"function identical to the devkit"* (XCB‑Lite ref §4.8) — so on a devkit/XCB‑Lite‑wired carrier the Power
+  key (→ `KEY_POWER`) and Sleep key work, while **Reset and Recovery are hardware** (`SYS_RESET_N` / bootrom
+  `FORCE_RECOVERY`), independent of the DT. If a button still does nothing on the **M110/J106** rig, that
+  carrier routes the button pin differently than the devkit and needs its own `gpio-keys` GPIO mapping
+  (requires the carrier schematic) — could not be verified remotely (no way to press buttons over SSH).
 
 ### Notes
 - Detailed chronological bring‑up investigation (every dead‑end, symptom, and the reasoning that led to
   each fix above) is preserved in the git history of this file.
+- **Cross‑checked against the working TX1 reference** (2026‑06‑14): the camera driver patch `0001` mirrors
+  Auvidea's TX1 R24.2.1 imx219 patch exactly (comment out `gpio_set_value(reset,0)`; release the shared
+  reset high once) and the 680 Mbps PLL matches Auvidea's TX1 values; the micro‑USB fix mirrors TX1's
+  carrier‑independent OTG approach; buttons confirmed devkit‑wired via the XCB‑Lite reference.

@@ -11,3 +11,20 @@
 	regulator-always-on;
 	regulator-boot-on;
 };
+
+/* Micro-USB / OTG device mode (USB0 leaves the J106 via M110 connector J17).
+ *
+ * Stock usb2-0 is mode="otg"; its VBUS/ID detect lives on devkit GPIOs that the
+ * carrier does not wire (M110 USB0_ID floats, host VBUS not routed to a detect
+ * GPIO), so extcon never reports "attached", xudc@3550000 stays in ELPG and the
+ * micro-USB never enumerates on a host PC.
+ *
+ * Fix: force the port to DEVICE mode so xudc owns it unconditionally. The L4T
+ * usb-device-mode gadget (acm.GS0 + rndis/ncm + mass_storage) then binds to the
+ * UDC, and the host sees /dev/ttyACM0 (serial console) + 192.168.55.1 (USB net).
+ * (The working TX1 BSP instead used PMU VBUS detection; on tegra186 the clean
+ * carrier-independent equivalent is simply mode="device".)
+ */
+&{/xusb_padctl@3520000/ports/usb2-0} {
+	mode = "device";
+};
