@@ -633,13 +633,16 @@ stock `Image` are never modified.
   micro‑USB such as the **XCB‑Lite**, "function identical to devkit"), it enumerates as **`/dev/ttyACM0`** +
   `192.168.55.1` — **not** `ttyS0` (that's UART0). Remaining options: route the M110 host VBUS to the Tegra
   VBUS sense + float ID (hardware), or use the XCB‑Lite micro‑USB.
-- **Carrier buttons.** The DT **does** carry the stock devkit `gpio-keys` (power / volume / sw\_wake →
-  registers an input device), and the XCB‑Lite breakout's Power/Reset/Sleep/Recovery keys are documented as
-  *"function identical to the devkit"* (XCB‑Lite ref §4.8) — so on a devkit/XCB‑Lite‑wired carrier the Power
-  key (→ `KEY_POWER`) and Sleep key work, while **Reset and Recovery are hardware** (`SYS_RESET_N` / bootrom
-  `FORCE_RECOVERY`), independent of the DT. If a button still does nothing on the **M110/J106** rig, that
-  carrier routes the button pin differently than the devkit and needs its own `gpio-keys` GPIO mapping
-  (requires the carrier schematic) — could not be verified remotely (no way to press buttons over SSH).
+- **Carrier buttons — VERIFIED working (it's a key‑mapping issue, not broken hardware).** Live test
+  (2026‑06‑14): watched the GPIO lines + the `gpio-keys` event node (`event4`) while the user pressed the
+  J106/M110 buttons — captured **4× `KEY_POWER` + 4× `KEY_VOLUMEUP`** as real input events. So the buttons are
+  electrically fine and reach the OS; they're wired to the Tegra pins the **stock devkit DT labels**:
+  - **gpio‑312 → `KEY_POWER`** — works; normally triggers OS shutdown (`logind HandlePowerKey=poweroff`).
+  - **gpio‑313 → `KEY_VOLUMEUP`** — a **no‑op on a headless system**, which is why that button *looks* dead.
+  - **Reset / Recovery** are hardware: `SYS_RESET_N` (reset works — LED blinks) and bootrom `FORCE_RECOVERY`
+    (acts only when held during boot, for flashing) — not runtime `gpio-keys`, no recovery GPIO at runtime.
+  So nothing is broken. *Optional polish:* if you want the `KEY_VOLUMEUP` button to do something useful on a
+  headless rig, remap its `linux,code` in the `gpio-keys` node (e.g. to `KEY_POWER`/`KEY_RESTART`) in the dtsi.
 
 ### Notes
 - Detailed chronological bring‑up investigation (every dead‑end, symptom, and the reasoning that led to
