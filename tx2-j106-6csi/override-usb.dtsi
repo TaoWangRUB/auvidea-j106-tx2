@@ -12,25 +12,13 @@
 	regulator-boot-on;
 };
 
-/* Micro-USB / OTG device mode (USB0 leaves the J106 via M110 connector J17).
+/* Note on the micro-USB / OTG port (USB0 → M110 connector J17):
  *
- * Force usb2-0 to DEVICE mode so the xudc device controller owns the port and the
- * L4T usb-device-mode gadget (acm.GS0 + rndis/ncm + mass_storage) binds to the UDC.
- * Verified on the board: usb2-0 mode=device, xudc active, gadget bound to
- * UDC 3550000.xudc, /dev/ttyGS0 present. On a properly OTG-wired carrier this makes
- * the micro-USB enumerate on a host PC as /dev/ttyACM0 (serial console) +
- * 192.168.55.1 (USB net) — NOT ttyS0 (that is UART0, a separate link).
- *
- * ⚠️ On the M110 (J17) it still does NOT enumerate: dmesg shows
- *    `tegra-xudc 3550000.xudc: vbus state: 0`  and  `extcon@1: USB_HOST=1`
- * i.e. the OTG ID/VBUS detect (stock devkit GPIOs, floating on the carrier) reads
- * the port as HOST and xudc never sees the host's VBUS, so it stays in ELPG and the
- * gadget never goes online. This is the §7 / §7.1a M110 OTG-routing limitation, not
- * a software bug — confirmed at register level. (Stripping xudc's extcon/otg-controller
- * to force pure-device instead breaks the padctl with -517, so it is NOT done here.)
- * The working TX1 BSP avoided this by using PMU VBUS detection; on a devkit-wired
- * micro-USB (e.g. XCB-Lite, "function identical to devkit") this binding works as-is.
+ * We deliberately leave usb2-0 as stock `mode="otg"`. The Linux device-mode gadget
+ * (/dev/ttyACM0 + 192.168.55.1) does NOT work on the M110 J17 — it is a host-leaning
+ * port (USB0_ID floats → host, USB0_VBUS tied to the M110's own 5V out), so xudc never
+ * sees the host's VBUS (dmesg: `xudc vbus state: 0`, `extcon@1: USB_HOST=1`). Forcing
+ * `mode="device"` only binds an offline gadget and prevents J17 from acting as a USB
+ * host — no benefit — so it is NOT done. Recovery/flashing over J17 works regardless
+ * (bootrom-driven RCM; verified: host sees 0955:7c18). See README §7 + tools/.
  */
-&{/xusb_padctl@3520000/ports/usb2-0} {
-	mode = "device";
-};

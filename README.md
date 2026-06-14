@@ -630,11 +630,12 @@ stock `Image` are never modified.
 - **Micro‑USB Linux device‑mode gadget (`/dev/ttyACM0` / `192.168.55.1`) — will NOT work on M110 J17.** This is
   USB0/OTG (J106 → M110 **J17**), *separate* from UART0 (and *separate* from recovery, which **does** work —
   see Working). Per the M110 PDF, J17 is a **host‑leaning port**: `USB0_ID` floats → host, and `USB0_VBUS` is
-  tied to the M110's own 5 V output. `override-usb.dtsi` `usb2-0 mode="device"` binds the L4T gadget
+  tied to the M110's own 5 V output. Forcing `usb2-0 mode="device"` binds the L4T gadget
   (`acm.GS0`+`rndis/ncm`+`mass_storage` on UDC `3550000.xudc`, `/dev/ttyGS0` present) but it **never goes
   online**: dmesg `tegra-xudc 3550000.xudc: vbus state: 0` + `extcon@1: USB_HOST=1` (host VBUS not sensed) →
   xudc stays in ELPG, host sees nothing. Confirmed at register level — **hardware wiring, not a software bug**
-  (forcing pure‑device by stripping xudc's `extcon`/`otg-controller` breaks the padctl with `-517`). It would
+  (forcing pure‑device by stripping xudc's `extcon`/`otg-controller` breaks the padctl with `-517`). So we **leave `usb2-0` as stock `mode="otg"`** (forcing device gave no
+  benefit and would block J17 from acting as a USB host). It would
   enumerate on a devkit‑wired micro‑USB (e.g. **XCB‑Lite**). *Recovery/flashing over the same J17 works fine
   (Working) — that is what the port is for.*
 
