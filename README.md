@@ -1577,9 +1577,520 @@ This is also why **raw V4L2 full‑res tops out at ~16 fps** — that is the tru
 
 #### Still open — multi‑camera Argus contention
 
-Single‑camera is perfect; **simultaneous** Argus sessions degrade: 5× 1080p30 → ~6 fps each; a
-clean 2‑camera run gave one camera ~14 fps and the other a `TIMEOUT`. It is **not** clock‑bound
+Single‑camera is perfect; **simultaneous** Argus sessions degrade. It is **not** clock‑bound
 (force‑locking VI=409.6 MHz / ISP=768 MHz via BPMP changed nothing) and **not** CPU‑bound (95 %
-idle). Leading hypothesis: per‑frame exposure/gain **I²C writes contend** on shared buses
-(A+B share i2c‑1, C+D share i2c‑2, E+F share i2c‑7). Next discriminator: A+E (different buses) vs
-A+B (same bus); and a single multi‑session libargus app vs N separate `gst-launch` processes.
+idle).
+
+##### Discriminator run (2026‑06‑13) — I²C‑bus contention DISPROVEN
+
+This boot enumerated only **A (`1‑0010`, video0, i2c‑1)** and **F (`7‑0012`, video1, i2c‑7)** — a
+**different‑bus** pair (the other four failed i2c probe `-121` this boot; per‑boot lottery / reseat).
+`nvarguscamerasrc` 1080p30, `fakesink`, fps measured via `fpsdisplaysink`:
+
+| Cameras | fps each | **aggregate** |
+|---|---|---|
+| A alone | 30.62 | 30.6 |
+| F alone | 30.52 | 30.5 |
+| **A + F simultaneous (different buses)** | **15.25 / 15.17** | **~30.4** |
+| 5× (earlier) | ~6 | ~30 |
+
+**Aggregate frame rate is conserved at ~one camera's worth (~30 fps) regardless of camera count.**
+A+F share *no* i2c bus yet still halve cleanly → the **per‑frame‑I²C‑contention hypothesis is
+wrong**. The signature (total ≈ const, ~95 % CPU idle, not clock‑bound) is a **single serialized
+capture/processing resource** that round‑robins across channels — the streams time‑share one
+pipeline stage (VI capture path / single syncpoint waiter / single ISP context) rather than running
+concurrently. (Note: this clean 2‑cam run had **no `TIMEOUT`**, unlike the earlier 14/TIMEOUT pair —
+that one likely involved the flaky C/D bus.)
+
+##### TX1 cross‑check — dual ISP vs TX2 single ISP (2026‑06‑13)
+
+The TX1 (tegra210) tree that drives the working 6‑camera grid (`/tmp/tx1-auvidea.dts`,
+`tegra210-jetson-auvidea-140-IMX219.dtb`) enables **two independent ISP cores**, both
+`status="okay"`:
+
+| | node | compatible | power‑domain | irq |
+|---|---|---|---|---|
+| ISP‑A | `isp@54600000` | `nvidia,tegra210-isp` | `0x70` | `0x47` |
+| ISP‑B | `isp@54680000` | `nvidia,tegra210-isp` | `0x78` | `0x46` |
+
+plus `vi` with `num-channels = <6>`. **TX2 (tegra186) exposes exactly ONE ISP** — `isp@15600000` —
+in *every* NVIDIA t186 DT source (`tegra186-soc-base/cvm/vcm.dtsi`) and on the live board; there is
+no second ISP node anywhere in t186 L4T. So the user's "TX2 has 2 ISP cores" is **not** the operative
+reality under L4T R32: even if Parker silicon contains a dormant 2nd core, there is no DT node, no
+driver instance, and Argus + the ISP falcon firmware are closed blobs we cannot extend to reach it.
+
+**BUT a 2nd ISP is almost certainly not the fix.** Two 1080p30 streams = ~124 MP/s; the single t186
+ISP registered `isp_iso_bw=1.5 GB/s` and is specced ~1 Gpix/s — ~6–12× headroom. The 15/15 result is
+**not** ISP saturation, it is *serialization* (one capture in flight). Corroborating: a **raw V4L2**
+second stream fails outright — `video1` returns `VIDIOC_S_FMT: Device or resource busy` while
+`video0` runs — i.e. the VI4 raw path is single‑context as configured here, even though Argus
+multiplexes (badly). This points at our **VI4 channel / nvcsi‑stream allocation in the overlay**, not
+the ISP count. (Also note raw V4L2 1080p runs only 16 fps while Argus gets 30 — the raw path is on a
+different, slower mode select.)
+
+##### Root-cause narrowed (2026‑06‑13, cont.) — it is frame‑rate serialization, NOT clocks/bandwidth/ISP
+
+Three experiments this session, in order:
+
+1. **DT channel‑mapping audit — CLEAN.** `tegra186-camera-j106-imx219.dtsi` already gives each of the
+   6 sensors a dedicated NVCSI `channel@N` + VI `port@N` (`num-channels=6`), mirroring TX1's per‑sensor
+   `csi-port`. No shared channels in the graph. (Aside: our `max_pixel_rate=<240000>` is copied from
+   NVIDIA's 2‑camera `tegra186-camera-rbpcv2-imx219.dtsi`; it only sizes EMC/ISO **bandwidth**, not the
+   VI core clock, and is undersized for 6×1080p30 — raise it when scaling, but it is *not* the cause.)
+
+2. **Clocks during stream.** `vi` clock stays pinned at **115.2 MHz** during 1‑cam and 2‑cam; `isp`
+   ramps 115→**768 MHz** at stream‑on. Looked like a smoking gun (VI not ramping), BUT:
+   - **BPMP force‑locking the VI clock breaks Argus** — `mrq_rate_locked=1` → `Failed to create
+     CaptureSession` (Argus must set its own VI rate). So the old "locking VI=409.6 didn't help" note
+     was likely just Argus failing, never a real test. Force‑lock is a dead end for this.
+
+3. **Resolution sweep — DECISIVE.** Aggregate fps is **conserved at ~30 fps total regardless of
+   resolution and camera count**:
+
+   | | 1‑cam | 2‑cam (each) | 5‑cam (each) | aggregate |
+   |---|---|---|---|---|
+   | **1080p** | 30.6 | 15.2 | 6.0 | ~30 |
+   | **720p**  | 26.5 | 13.2 | 6.7 | ~27–33 |
+
+   720p moves **2.25× less data** but gets the **same** per‑camera fps → it is **not** bandwidth, not
+   VI clock, not ISP throughput, not ISP count (all of those would let 720p run faster). It is a fixed
+   **~30 fps aggregate, resolution‑independent**. This rules out bandwidth/pixel‑rate (720p pushes ~½
+   the MP/s of 1080p yet caps at the same frame count → conserved quantity is *frames*, not pixels).
+   ⚠️ *Initially* read as a VI/whole‑subsystem serialization, but the controlled experiments below
+   localize it to the Argus/ISP path — raw V4L2 does NOT exhibit it. (The earlier raw‑V4L2
+   `Device or resource busy` was a launch race, not a real concurrency limit — see (b) below.)
+
+RidgeRun confirms the target is real on identical HW: `gst-launch-1.0 nvarguscamerasrc sensor-id=0..5
+! 1280x720@30 ! nvvidconv ! xvimagesink` ×6 → 6×720p30.
+
+##### CONFIRMED & LOCALIZED (2026‑06‑13, final) — it is the Argus/ISP path, NOT clocks/params/VI
+
+Two controlled experiments settled it:
+
+**(a) Max all camera clocks mid‑stream — NO effect.** With a 2‑cam 1080p Argus stream running at
+15/15, boosting `vi` 115→**998.4 MHz**, `nvcsi` 112→**225 MHz**, `isp` 115→**1088 MHz** (verified
+held via `mrq_rate_locked`) changed the fps by **nothing**: 15.2/15.3 → 15.2/15.1. This rigorously
+**rules out clocks** — including NVIDIA's own generic "boost VI/ISP/NVCSI" fix and, transitively,
+`max_pixel_rate` (it only feeds the clock/bw budget). (Earlier the lock had to be applied *mid‑stream*;
+applying it before Argus starts makes Argus fail `CaptureSession`.)
+
+**(b) Raw V4L2 vs Argus, same HW/clocks, 2 cameras 1080p (staggered start):**
+
+| capture path | cam0 | cam1 | aggregate | scaling |
+|---|---|---|---|---|
+| **Argus** `nvarguscamerasrc` (uses ISP) | 15.0 | 15.0 | 30 | **halves** |
+| **Raw V4L2** `v4l2-ctl` (bypasses ISP) | 15.98 | 15.98 | **32** | **full rate, parallel** |
+
+Raw V4L2 runs **both cameras concurrently at full single‑cam rate, no halving, no errors** (the
+earlier `Device or resource busy` was a launch race — fixed by a 2 s stagger). Argus halves on the
+**identical hardware and clocks**.
+
+**Conclusion (evidence, not hypothesis):** the VI/CSI/sensor/clocks/EMC are all fine and *do*
+capture in parallel. The ~30‑fps‑aggregate serialization is **specific to the Argus / libargus‑SCF /
+ISP path** (`nvarguscamerasrc`). This matches the NVIDIA‑forum pattern exactly ("v4l2 gets full
+parallel framerate, `nvarguscamerasrc` doesn't" — threads 155239, 115204, 110230). So "serialization"
+is the right description **and it lives in Argus on the single ISP**, not in our DT/clocks/parameters.
+
+**Open nuance:** RidgeRun's *Argus* does 6×720p30 on this exact J106, and NVIDIA specs the ISP at
+"6@30fps" — so Argus *can* parallelize on one ISP. Ours doesn't → the difference is an Argus/sensor‑
+mode/DT‑timing config, not VI/clocks. Prime suspects now: our **derated `pix_clk_hz` / lowered‑MIPI
+mode tables** and mode‑timing fields that Argus uses to schedule ISP captures.
+
+##### Standard‑fix sweep — every common Jetson multi‑cam knob TESTED & ELIMINATED (2026‑06‑13)
+
+A user/Google claim said "TX2 has no aggregate cap; use `nvpmodel -m 0` + `jetson_clocks` +
+`maxperf=true`." The *capability* claim is true (NVIDIA spec + RidgeRun), but **none of the knobs fix
+our halving** — each tested on this board (L4T R32.7.6 + our DT/driver):
+
+| knob tested | result |
+|---|---|
+| `nvpmodel -m 0` (MAXN, persists) | 1cam 30.7 → 2cam **15.2/15.3** — still halves |
+| `jetson_clocks` | **breaks Argus** → `Failed to create CaptureSession` (recover only by reboot) |
+| `nvarguscamerasrc maxperf=true` | **no such property** on R32.7.6 (`erroneous pipeline: no property "maxperf"`) |
+| `aelock`/`awblock` | not properties either (valid: `sensor-mode`, `exposuretimerange`, `gainrange`, `ispdigitalgainrange`, `tnr-strength`) |
+| manual max vi/nvcsi/isp clocks (mid‑stream) | no change |
+| **single‑process pipeline = RidgeRun's exact cmd** (all sources in one `gst-launch`, 720p NV12 `nvvidconv`) | **also halves** — 2cam ≈ 13.3/13.3, 4cam ≈ 6.5×4 |
+| raw V4L2 (bypass ISP) | **scales** (3×16=48) |
+
+So it is **not** the command/process model, **not** power mode, **not** clocks, **not** `maxperf`.
+No evidence of an R32.7‑vs‑R32.2 Argus regression either.
+
+##### Derated‑timing hypothesis TESTED & REFUTED (2026‑06‑13) — full stock 912 Mbps rebuild
+
+Rebuilt the kernel (`#7`) with **stock** `imx219_mode_tbls.h` (`PLL_VT_MPY` 57, `PLL_OP_MPY` 114 =
+912 Mbps) + a stock‑timing DTB (`pix_clk_hz` 182.4 MHz, `mclk_multiplier` 9.33, framerates
+21/28/30/44/60), deployed reversibly as boot label `j106-912` (`Image.j106-912` +
+`tegra186-j106-stock912.dtb`). Result:
+
+| | derated 680 | **stock 912 (this test)** |
+|---|---|---|
+| 1‑cam 1080p | 30.6 | **30.25** (stable, 0 CSI errors) |
+| 2‑cam 1080p | 15.2/15.3 | **14.99/15.08 — identical halving** |
+
+**Restoring exact RidgeRun/stock timing did NOT fix the halving.** The derated sensor‑mode timing is
+**not** the cause. ⚠️ Also a needed correction: the RidgeRun wiki only *shows* the 6‑camera command —
+it never *measures* sustained 30 fps — so "RidgeRun proves 6×720p30 via Argus" was an over‑read on my
+part; their 6‑cam may halve too. NVIDIA's "6@30fps" is an ISP *throughput capability* claim, not a
+measured libargus‑multi‑session result.
+
+##### Where it actually stands (every config‑side cause eliminated)
+
+The Argus ~30‑fps‑aggregate halving persists across **sensor timing (680 vs 912), clocks, power mode,
+process model, resolution** — i.e. nothing in our DT/driver/runtime changes it — while **raw V4L2
+scales** (hardware is fine). Remaining suspects, none yet tested: **(1)** L4T version (we're R32.7.6;
+RidgeRun R32.2.1 — different libargus); **(2)** kernel cmdline **`isolcpus=1-2`** (unusual; isolates 2
+of the board's cores from the scheduler — could starve the multi‑threaded `nvargus-daemon`; cheap to
+test by removing it); **(3)** inherent libargus single‑ISP session time‑slicing on R32.7.6. The
+proven‑scaling route is unchanged: **bypass the ISP** (raw V4L2 + GPU debayer).
+
+##### Two paths to TX1‑grid parity (ranked)
+1. **Bypass the ISP** — raw V4L2 capture (proven to parallelize) + GPU/CUDA debayer
+   (`nvivafilter`/`v4l2src ! ...`) for the grid. Most reliable given the evidence; sidesteps libargus
+   entirely. (First resolve why raw 1080p caps at ~16 fps — likely the derated mode select; check
+   720p raw.)
+2. **Make Argus parallelize** — diff our sensor‑mode timing (`pix_clk_hz`, `line_length`,
+   `mclk_multiplier`, framerates) against a stock/RidgeRun IMX219 mode set; the derated‑MIPI tables are
+   the leading suspect for why libargus‑SCF schedules our ISP captures serially.
+
+⚠️ **Operational lessons (cost real reboots this session):** (a) `fpsdisplaysink` only prints
+`average:` with `gst-launch -v`; (b) **never let a capture be killed** — a foreground/background ssh
+*timeout* SIGTERMs the remote gst and **wedges the VI (reboot‑only)**; run board tests **detached**
+(`setsid bash script </dev/null &`) writing to a logfile, poll the log over short separate ssh calls,
+and always use `num-buffers` for natural EOS. (c) Don't run `sudo nvpmodel -q` non‑interactively — it
+can block on a sudo prompt and hang the session.
+
+## 7.10 ⚙️ Plan step 2 EXECUTED — board reflashed to L4T R32.2.1 to test the libargus‑version hypothesis (2026‑06‑14)
+
+Config‑side causes for the Argus halving are exhausted (§7.9): sensor timing (680 vs **stock 912**),
+clocks, power mode, process model, resolution — **none** change it, while raw V4L2 scales. The only
+high‑confidence remaining suspect is the **libargus version** (we ran R32.7.6; RidgeRun's J106 work was
+R32.2.1 = JetPack 4.2.2). So we did the decisive test: **wipe R32.7.6 and flash stock R32.2.1.**
+
+### What was done
+- **BSP cross‑check.** Downloaded the **Auvidea J106/TX2 R32.2.1 BSP** (`J90_v2.2_4.2.2.tar.bz2`,
+  J9x/**J10x**/J120/… family) and **diffed it against stock NVIDIA R32.2.1** (`Jetson_Linux_R32.2.1`)
+  — see `bsp-r32.2/`. Auvidea's overlay changes only: **all DTBs**, a **custom kernel `Image` +
+  modules** (`kernel_supplements.tbz2`), and `p2771-0000.conf.common` where **`ODMDATA`
+  `0x1090000`→`0x3090000`** (USB UPHY lane ownership). Pinmux sources and kernel headers are byte‑identical
+  to stock. We flashed **stock** (not Auvidea) to keep the libargus variable isolated.
+- **Flashed stock R32.2.1** from the Dell host (Ubuntu 24.04). NVIDIA's 2019 flash tooling needed three
+  fixes to run under python 3.12: `tegraflash.py` `iteritems()`→`items()`; `tegraflash_internal.py`
+  6× `getiterator('file')`→`iter('file')`; and an `lbzip2`→`bzip2` shim for `apply_binaries.sh` (apt was
+  blocked by unrelated broken nvidia‑driver deps — did **not** `apt --fix-broken`). **Fresh‑recovery
+  rule:** each `flash.sh` consumes the bootrom UID stage, so a board that still shows `0955:7c18` but was
+  already probed gives **"Failed to read UID" / "probing failed"** — must **power‑cycle into recovery
+  fresh** per attempt. `flash.sh -r jetson-tx2 mmcblk0p1` succeeded (`FLASH_EXIT=0`). Full procedure in
+  the `r3221-flash-procedure` memory.
+- **First boot without the dead OTG gadget.** Stock sample rootfs blocks on oem‑config; the USB‑gadget
+  console (`/dev/ttyGS0`) is dead (§7.1a), but R32.2.1 oem‑config **falls back to `/dev/ttyS0` = the
+  debug UART0** ("ttyGS0 is invalid, … setup on /dev/ttyS0"). Completed it interactively over UART0
+  (license = **Tab then Enter**; Ctrl‑L redraws; frozen inter‑phase screens advance on `\r`; weak‑pw /
+  yes‑no = Left‑arrow then Enter). User `nvidia`/`nvidia`, hostname `tegra-ubuntu`.
+
+### Current state (verified)
+- **R32.2.1 up and reachable:** `ssh nvidia@10.42.0.157` (pw `nvidia`, via `-o ProxyJump=taowang@192.168.0.225`)
+  **and** UART0 login. `R32 (release), REVISION: 2.1`, kernel `4.9.140-tegra`, R32.2.1 `libnvargus.so`
+  present, `nvargus-daemon` active.
+- **Bonus free variable:** R32.2.1's stock cmdline has **no `isolcpus`** (R32.7.6 had `isolcpus=1-2`),
+  so this build also covers suspect (2) from §7.9.
+- **USB host still not working — expected.** Boot log shows `tegra-xusb-padctl … failed to setup XUSB
+  ports: -517`: we flashed the **stock devkit DTB**, which routes USB VBUS through the absent J106
+  `pca953x` expanders, and `ODMDATA` is the stock `0x1090000`. Plugging a USB dongle gives no reaction.
+  Fix = our `override-usb.dtsi` (forces the fixed regulator always‑on) **and** likely the Auvidea
+  `ODMDATA=0x3090000` (a re‑flash, since ODMDATA is set at flash time, not in the DTB). Not blocking the
+  Argus test (access is over eth).
+- **Cameras not yet present** — stock DTB, no `/dev/video*`.
+- **Rollback:** R32.7.6 BSP at `~/tx2_r3276/Linux_for_Tegra` on the Dell.
+
+### Plan to verify next (decisive Argus test)
+1. **Port the camera DT to R32.2.1** (Approach A): decompile this board's stock `tegra186-quill-p3310-1000-c03-00-base.dtb`,
+   add the `tegra_car`/`tegra_main_gpio` labels, `cat` `tegra186-camera-j106-imx219.dtsi` + `override-usb.dtsi`,
+   recompile with `dtc -@`. (`override-usb.dtsi` should also restore USB host.)
+2. **Rebuild the imx219 share‑reset patch** (`0001`) against R32.2.1 kernel source; build the Image.
+3. **Deploy reversibly** via an `extlinux` LABEL (keep stock as fallback); confirm all sensors probe and
+   `/dev/video*` appear; confirm the §7.8 fixes (`discontinuous_clk="no"`, `embedded_metadata_height="2"`)
+   still apply on R32.2.1.
+4. **Run the 2‑cam 1080p Argus measurement** (detached, `num-buffers`, poll a logfile — §7.9 operational
+   rules) and compare against raw V4L2:
+   - **If Argus scales (≈30+30)** → the halving was an **R32.7.6 libargus regression**; R32.2.1 is the
+     answer for the ISP path. (If so, also bisect isolcpus vs libargus to attribute it.)
+   - **If Argus still halves (≈15+15)** → confirms **inherent libargus single‑ISP serialization**; pivot
+     to **Plan step 3** (raw V4L2 + CUDA debayer, already de‑risked by proven V4L2 scaling).
+
+### 7.10.1 ✅ RESULT — libargus version REFUTED (2026‑06‑14): R32.2.1 halves identically
+
+Executed the test end‑to‑end on R32.2.1. Built the patched kernel (official R32.2.1 `kernel_src` +
+board `/proc/config.gz` + imx219 shared‑reset patch, `LOCALVERSION=-tegra`, host `-fcommon` for the
+gcc‑13 dtc link) and the carrier DTB (decompiled R32.2.1 c03 + the stock‑912 camera dtsi +
+`override-usb`), deployed reversibly as `extlinux` LABEL `j106cam`.
+
+**Cameras came up cleanly on R32.2.1:** `/dev/video0–4`, imx219 `v2.0.6` bound on 1‑0010, 2‑0010,
+2‑0012, 7‑0010, 7‑0012 (B@1‑0012 `-121` = no physical camera). **No `-EBUSY`** → the shared‑reset
+patch works on R32.2.1. Stock modules load (no vermagic mismatch). dmesg clean (nvcsi/vi4 init, all 6
+channels bound, **zero chansel/fault/timeout**).
+
+**Argus fps (nvarguscamerasrc, 1080p, `num-buffers=300`, clean boot per measurement):**
+
+| | 1‑cam | 2‑cam | aggregate |
+|---|---|---|---|
+| R32.7.6 (prior) | 30.6 | 15.2 / 15.3 | ~30.5 |
+| **R32.2.1 (this test)** | **22.74** | **11.38 / 11.35** | **~22.7** |
+
+**The aggregate is conserved at one camera's worth on BOTH versions** — i.e. R32.2.1 libargus
+serializes multi‑camera **identically** to R32.7.6. (The lower absolute baseline is just default power
+mode / not‑maxed clocks; irrelevant to the pattern — §7.9 proved clocks don't change the halving.)
+
+**Conclusions:**
+- **Hypothesis "libargus‑version regression" → REFUTED.** RidgeRun's R32.2.1 libargus halves too.
+- **Hypothesis "`isolcpus=1-2`" → REFUTED for free** — R32.2.1's stock cmdline has **no `isolcpus`**,
+  yet it still halves.
+- Combined with §7.9 (sensor timing, clocks, power, process model, resolution all refuted) and the
+  clean kernel dmesg, the Argus ~1‑camera‑aggregate cap is **inherent libargus single‑ISP
+  serialization** — not fixable via DT/driver/kernel/L4T‑version/CPU‑isolation levers.
+- **Plan steps 1 & 2 are now exhausted.** The path to 6×30 is **step 3: bypass the ISP** — raw V4L2
+  capture (proven to scale: 3×16, 4×16 with staggered start) + GPU/CUDA debayer
+  (`12_camera_v4l2_cuda`‑style, dmabuf→CUDA→NVMM→nvv4l2h264enc, no CPU copy).
+
+**Board now boots `j106cam` (patched R32.2.1, 5 cameras).** Fallbacks: `auvcam`, `primary`. VI wedges
+after an Argus run (reboot‑only, §7.9) — reboot between Argus measurements.
+
+### 7.10.2 CPU and GStreamer also REFUTED — native libargus halves identically (2026‑06‑14)
+
+Two more suspects eliminated, closing every angle:
+
+- **CPU/clocks — NOT it.** `tegrastats` during the 2‑cam halving at **MAXN (6 cores)** shows the SoC
+  **idle**: cores 5–30% (one brief 66%), **CPU clock pinned at the 345 MHz idle floor** (governor sees no
+  demand), `GR3D 0%` (GPU idle), `EMC ~10%`. Going 4→6 cores didn't change per‑cam fps. Capped throughput
+  with an idle SoC = waiting on a serialized resource, not resource exhaustion. (Aside: R32.2.1's default
+  power mode keeps the **Denver cores offline** — `online: 0,3-5` — which is why the default 1‑cam baseline is
+  ~22 not 30; the *ratio* is unaffected.)
+- **GStreamer wrapper — NOT it.** Wrote a headless **native libargus** frame‑counter (`FrameConsumer`, no
+  rendering; built from the R32.2.1 MMAPI headers) to remove `nvarguscamerasrc` from the equation:
+
+  | path (MAXN, 1080p) | 1‑cam | 2‑cam | aggregate |
+  |---|---|---|---|
+  | gst `nvarguscamerasrc` | ~22 | 11.4 / 11.4 | 22.7 |
+  | **native libargus** | **22.3** | **11.5 / 11.3** | **22.8** |
+
+  Native Argus halves **identically** → it's the closed `libnvargus`/single‑ISP scheduler, not the gst layer.
+
+**Conclusion is now exhaustive.** The cap is independent of L4T version, `isolcpus`, sensor timing, clocks,
+power mode, CPU, shared mclk/reset (raw V4L2 scales on the same wiring), and the GStreamer layer (native
+Argus halves the same). It lives in closed NVIDIA code with no public source. **→ Step 3 (bypass the ISP:
+raw V4L2 + CUDA debayer, all‑GPU/dmabuf, zero CPU copies) is the only route to 6×30.** The MMAPI's
+`cudaBayerDemosaic` sample is the starting point.
+
+## 7.11 ⚠️ GROUND TRUTH on TX1 — corrects the "single‑ISP halving" claim (2026‑06‑14)
+
+Swapped the **TX1** module (L4T R24.2.1, 2× ISP) onto the **same J106 + same cameras** as the reference,
+to validate the TX2 findings. Two results — one of which **overturns §7.9/§7.10.1**.
+
+### (1) The cameras are 6 genuinely distinct sensors — verified visually
+Raw V4L2 per `/dev/videoN` (no ISP, no AE), debayered to JPEG, shows **5 different scenes** (not one):
+cam A = wall/ceiling, C = dark, D = pen‑holder + cables + green LED, E = foliage, F = bottle/desk.
+Captured as `s0/s2/s3/s4/s5.raw` (`v4l2-ctl -d /dev/videoN --set-fmt-video=...pixelformat=RG10 --stream-mmap
+--stream-count=1 --stream-to=...`), debayered with a small numpy/PIL script → `captures/cam_s*.jpg`.
+Cover test (raw 16‑bit pixel mean): covering **port F** dropped **only video5** (63.6→79.8 on uncover),
+others flat → independent cameras, deterministic `/dev/videoN` mapping.
+
+### (2) TX1 runs 5×1080p concurrently through the ISP at full rate — WORKS, no halving
+The **working method is ONE gst pipeline** (`nvcamerasrc` is single‑instance *per process* — separate
+`gst-launch` instances fail; a single pipeline with all sources works). `fpsRange="N N"` is needed to
+lock the sensor mode. Command (grid → mp4, output `captures/tx1_5cam_1080p.mp4`):
+```bash
+gst-launch-1.0 -e videomixer name=mix \
+  sink_0::xpos=0 sink_0::ypos=0 sink_1::xpos=640 sink_1::ypos=0 sink_2::xpos=1280 sink_2::ypos=0 \
+  sink_3::xpos=0 sink_3::ypos=360 sink_4::xpos=640 sink_4::ypos=360 \
+  ! videoconvert ! omxh264enc bitrate=10000000 ! h264parse ! qtmux ! filesink location=tx1_5cam_1080p.mp4 \
+  nvcamerasrc sensor-id=0 fpsRange="30 30" num-buffers=300 ! 'video/x-raw(memory:NVMM),width=1920,height=1080,format=I420,framerate=30/1' ! nvvidconv ! 'video/x-raw,width=640,height=360' ! mix.sink_0 \
+  nvcamerasrc sensor-id=2 fpsRange="30 30" num-buffers=300 ! 'video/x-raw(memory:NVMM),width=1920,height=1080,format=I420,framerate=30/1' ! nvvidconv ! 'video/x-raw,width=640,height=360' ! mix.sink_1 \
+  nvcamerasrc sensor-id=3 ... ! mix.sink_2 \
+  nvcamerasrc sensor-id=4 ... ! mix.sink_3 \
+  nvcamerasrc sensor-id=5 ... ! mix.sink_4
+```
+**Result: RC=0, 300 frames in 8.95 s ≈ 33 fps sustained on ALL 5 cameras concurrently, no halving.**
+(If any camera had halved, the mixer would stall and the run take ~20 s; it took 9 s.) Daemon gotcha:
+`nvcamera-daemon` crashes from abuse (`Camera Daemon stopped functioning`) → `systemctl restart
+nvcamera-daemon` (or reboot). TX1 access: `ssh ubuntu@10.42.0.86` (pw `ubuntu`).
+
+### (3) ⚠️ Correction to §7.9/§7.10.1 — the TX2 "halving" was `sensor-id` ALIASING, not single‑ISP serialization
+On TX1 the cameras image **different scenes**, but on **TX2** every `nvarguscamerasrc sensor-id 0–3`
+capture showed the **same scene** (camera F). So TX2's Argus `sensor-id` **aliases all ids to one CSI
+port/camera** — the "2‑cam = 15+15" was **two Argus sessions splitting ONE camera's 30 fps**, never two
+distinct cameras serializing on one ISP. **The "inherent single‑ISP serialization" conclusion is retracted**
+— all the Argus halving experiments (timing/clocks/power/CPU/L4T‑version/isolcpus/interleave/native
+FrameConsumer) ran on the *one aliased camera*. The kernel/V4L2 side on TX2 is correct (distinct
+`/dev/video`, distinct media graph, cover test works); the aliasing is in the **Argus / tegra‑camera‑platform
+enumeration** (userspace). **Step‑3 "bypass the ISP" is therefore premature.** Next on TX2: fix the
+`sensor-id`→distinct‑camera mapping, then re‑test multi‑cam Argus on genuinely distinct cameras — it may
+scale (as TX1's ISP does) or hit a real single‑ISP limit; **currently unknown**.
+
+## 7.12 ✅ ALIASING ROOT‑CAUSED in the nvargus daemon log — all 6 modules collapse to module *f* (2026‑06‑14)
+
+Re‑confirmed the aliasing on TX2 and then localized it exactly, from logs (not capture timeouts):
+
+**Re‑confirmation (Argus snapshots, captured right after boot, before the VI wedges):**
+`nvarguscamerasrc sensor-id=0..4 num-buffers=30 → nvjpegenc`. All five JPEGs are the **same scene**
+(green LED at the identical pixel, identical cable layout) — mean **21.9** / std **11.6** for *all five*;
+pairwise mean‑abs‑diff ≈ **1.0/255 (max ~16)** = pure frame‑to‑frame sensor noise on **one** physical
+source. Distinct cameras (proven distinct on TX1, §7.11) would differ by 20–80+. Files:
+`captures/tx2_arg_s0..4.jpg`.
+
+**Root cause (from `enableCamPclLogs=5 nvargus-daemon` foreground log, `/tmp/argusd.log`):**
+- NvPcl parses all 6 modules **correctly** — distinct names `j106_csi_a..f_imx219`, distinct devnames
+  `imx219 1-0010 / 1-0012 / 2-0010 / 2-0012 / 7-0010 / 7-0012`, scans `/dev/video0..4`.
+- But **every module reports `Position: 0` and every camera open matches `GUID 0` at *all* six indices**:
+  ```
+  NvPclStateControllerOpen: Found GUID 0 match at index[0]
+  ...                       Found GUID 0 match at index[5]
+  LoadOverridesFile: looking for ... j106_csi_f_imx219.isp     ← always module f (index 5)
+  ```
+  With all six GUIDs == 0, `NvPclStateControllerOpen` resolves **every** `sensor-id` to the **last**
+  matching module (**f**). Both a `sensor-id=0` open and a `sensor-id=2` open load **f**'s override → the
+  same physical port for all ids. **That is the aliasing**, and it lives entirely in closed‑source
+  `libnvpcl`/`libargus`. The DT is correct: running tree has distinct `port-index 0..5`, 6 nvcsi
+  channels, distinct `tegra-camera-platform` modules/badges/devnames.
+
+**Why V4L2 is fine but Argus is not:** V4L2 enumerates by driver load order → genuinely distinct
+`/dev/videoN`; libargus enumerates/identifies modules by `(GUID, position)`, and 6× identical IMX219
+with **no EEPROM/fuse serial** all hash to `(0, 0)` → libargus treats them as one camera's sub‑modules
+and last‑match‑wins onto *f*. This is the concrete mechanism behind the §7.11 "aliasing" observation.
+
+**Consequence (SUPERSEDED by §7.13):** initially read as "Argus unusable without patching closed
+userspace." **Wrong** — the `(GUID, position)` collision is fixable purely in the DT by giving each module a
+unique `position`. See §7.13: **this is now FIXED.**
+
+**Second, independent blocker (must fix for step 3 too):** the CSI link is marginal — after a few
+captures the VI wedges with a flood of `tegra-vi4 15700000.vi: PXL_SOF syncpt timeout! err = -11` +
+`tegra_channel_error_recovery`, and raw V4L2 then returns flat‑saturated frames (std ≈ 0.2). Camera D
+(`2-0012`) is intermittently dead (`invalid sensor model id: 00`). Raw step‑3 capture must run on a
+freshly‑booted board before the wedge. See §7.8.5 link‑stability experiments.
+
+## 7.13 ✅✅ ALIASING FIXED — unique `position` per module (2026‑06‑14)
+
+The §7.12 aliasing is a **pure device‑tree bug**, now fixed. NVIDIA's own docs state it plainly:
+*"If your system has multiple identical modules, each module must have a different position, making the
+module name unique."* Our 6 `tegra-camera-platform` modules all had **`position = "rear"`** → all hashed to
+`(GUID 0, position 0)` → libargus collapsed them onto module *f*.
+
+**Cross‑checked 4 ways before/after the change:**
+1. NVIDIA *Sensor Software Driver Programming* guide — identical modules need unique `position`; valid
+   6‑camera set = `{topleft, topright, centerleft, centerright, bottomleft, bottomright}`.
+2. **Stock TX1 L4T R24.2.1 BSP** `tegra210-jetson-tx1-…-devkit` DTB — its `e3322` module (**part# `A815P2`,
+   the same IMX219 our calibration log reports as `4BA815P2`**) uses **unique positions** per module while
+   even leaving the *badge identical* → proves **`position`, not `badge`, is the discriminator**.
+3. RidgeRun Auvidea J106 guide — confirms the J106 shares **one clock + one reset** across all 6 CSI ports
+   (our exact design) and that each module carries `badge`+`position`.
+4. Our own before/after daemon PCL log (below).
+
+**The fix** (in `tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi`, `tegra-camera-platform/modules`):
+each module given a unique `position` (and badge aligned to it, keeping the A–F hint):
+
+| module | devname | badge | position |
+|---|---|---|---|
+| module0 A | imx219 1‑0010 | imx219_topleft_csia     | topleft |
+| module1 B | imx219 1‑0012 | imx219_topright_csib    | topright |
+| module2 C | imx219 2‑0010 | imx219_centerleft_csic  | centerleft |
+| module3 D | imx219 2‑0012 | imx219_centerright_csid | centerright |
+| module4 E | imx219 7‑0010 | imx219_bottomleft_csie  | bottomleft |
+| module5 F | imx219 7‑0012 | imx219_bottomright_csif | bottomright |
+
+**Mechanism proof — daemon PCL log, before vs after:**
+```
+BEFORE: NvPclStateControllerOpen: Found GUID 0 match at index[0]      every sensor-id → module f
+        ...                       Found GUID 0 match at index[5]
+AFTER:  Found GUID 0 match at index[4]   GUID 1→idx2   GUID 2→idx3      each sensor-id → its OWN module
+        GUID 3→idx0   GUID 4→idx5   GUID 5→idx1                          (distinct GUIDs, 1:1 mapping)
+```
+Every module now gets a **distinct GUID (0–5), 1:1 with one index**; per‑open ISP overrides now span all six
+modules (`imx219_topleft…bottomright`) instead of always `f`. Visual corroboration: `sensor-id 0` now images
+**camera A's own scene** (plain wall) instead of the green‑LED desk that *all* ids showed before
+(`captures/tx2_fixed_camA.jpg`).
+
+**Deployed** as a reversible boot entry (no partition DTB touched): built by patching the decompiled
+**stock912** tree (preserves the 912 Mbps timing that matches `Image.j106`), `dtc`‑recompiled to
+`/boot/tegra186-j106-stock912-pos.dtb`, added `extlinux` `LABEL j106pos` (`DEFAULT j106pos`; `j106cam`
+kept as fallback). Build inputs in `/tmp/j106build/tegra186-j106-stock912.dts` (+`.bak`).
+
+> ⚠️ The repo dtsi (now carrying the position fix) is the **derated 680 Mbps** variant; the *deployed* DTB is
+> **stock912**. Both got the position fix, but if rebuilding from the repo dtsi, re‑confirm the timing matches
+> the deployed kernel driver (the clock‑mismatch trap from §earlier).
+
+**What remains (NOT aliasing):**
+- **Marginal CSI link** — still the main blocker: VI wedges (`PXL_SOF syncpt timeout err=-11`) after 1–few
+  Argus/V4L2 captures, so a full simultaneous 6‑cam grab isn't yet possible. §7.8.5 link experiments now
+  matter for *both* Argus and step‑3.
+- **Camera B** (`1-0012`) — no physical camera (`-121`). **Camera D** (`2-0012`) — intermittent i2c `-121`
+  (reseat / bus §7 fix).
+- **Diagnostics**: next runs should also capture **boot console over UART0 (`/dev/ttyUSB0`@115200) and the
+  micro‑USB gadget** (both currently connected), not just `dmesg` — the kernel ring buffer wraps under the
+  PXL_SOF flood and early bootloader/console lines are lost otherwise.
+- **Open question now testable:** with aliasing gone, does TX2's single ISP actually *scale* multi‑cam Argus
+  (like TX1) or hit a real limit? Needs a stable link to answer — the original "halving" question is finally
+  on genuinely distinct cameras.
+
+### 7.13.1 ✅ DELIVERABLE — TX2 4‑camera Argus grid video (2026‑06‑14)
+
+`captures/tx2_grid_4cam.mp4` — 1920×720 **2×3 grid** (3 cols × 2 rows), **30 fps, ~47 s sustained, no wedge**.
+Four cameras (A=topleft, C=centerleft, E=bottomleft, F=bottomright) each image a **distinct scene** — F now
+shows the green‑LED desk that *every* `sensor-id` aliased to before the fix; A/C/E show their own views. The
+TX2 equivalent of the TX1 grid. B (no physical camera) and D (i2c `-121` this boot — needs reseat) are the
+two empty cells.
+
+**Three things were needed to get the multi‑cam Argus grid running** (none were the CSI link, which held fine):
+1. **Aliasing fix** (§7.13) — unique `position` per module, else all cells show one camera.
+2. **Caps: drop `framerate`** — 720p has only **44 & 60 fps** modes (30 fps exists only at 1080p), so a
+   `width=1280,height=720,framerate=30/1` cap is unsatisfiable → Argus picks mode4 (60) → `not-negotiated (-4)`.
+   Use `video/x-raw(memory:NVMM),width=1280,height=720,format=NV12` (no framerate) or pick a valid pair.
+3. **Restart `nvargus-daemon` after any failed Argus run** — a prior `not-negotiated`/aborted run leaves the
+   daemon unable to create sessions (`Failed to create CaptureSession`); `systemctl restart nvargus-daemon`
+   clears it (no reboot needed).
+
+Pipeline (CPU `compositor`, since `nvcompositor`+Argus‑NVMM hits the §7.8.10 export bug): per‑source
+`nvarguscamerasrc sensor-id=N ! NVMM 1280x720 NV12 ! nvvidconv ! 640x360 I420 ! textoverlay ! queue !
+mix.sink_N`; `compositor` (3×2 cells) `! videoconvert ! omxh264enc ! h264parse ! qtmux ! filesink`; run with
+`-e`, SIGINT to finalize. Script left at `/tmp/grid.sh` on the board.
+
+### 7.13.2 ◑ 5‑camera grid (TX1 parity) — works briefly, blocked by 2 intermittent HW issues (2026‑06‑14)
+
+Tried to match the TX1 5‑cam grid (A,C,D,E,F; B has no camera). All five **do** work — on a boot where D
+enumerated, a 5‑cam Argus grid ran and produced a 16.7 s clip — but a **sustained 30 s** 5‑cam capture isn't
+reliable yet, for two reasons, **both intermittent carrier/link issues, neither the (fixed) aliasing**:
+1. **Camera D enumeration lottery** (§4.4 address‑shifter quirk) — D (`2-0012`, `0x12` via the bare‑J106 bus‑2
+   shifter) ACKs on some boots, not others (`i2c read probe -121`). C (`0x10`, same bus) is always solid; F
+   (`0x12`) is always solid because it's on the **M110** (robust translator at `0x43` + EEPROM `0x50`). Recovered
+   only by reboot/reset/power‑cycle — confirmed *not* a reseat/cable issue and *not* i2c speed (F runs `0x12`
+   fine at 400 kHz; an `i2cslow` 100 kHz DTB was built but **not** deployed — speed isn't the cause).
+2. **5‑cam link instability** — the 4‑cam grid is rock‑solid (47 s), but adding D destabilizes the simultaneous
+   start (`Internal data stream error` / `not-negotiated`), and repeated failed runs degrade the
+   `nvargus-daemon`/VI state (needs `systemctl restart nvargus-daemon`, sometimes reboot). This is the
+   marginal‑CSI‑link blocker (§7.8.5), now the last thing between us and full TX1 parity.
+
+So the reliable deliverable is the **4‑camera** grid; the **5‑camera** grid needs a boot where D enumerates —
+see §7.13.3 where it was achieved.
+
+**Caps gotcha worth repeating:** pin a *valid* mode — `1280x720` has only 44/60 fps (680‑rate: 44/110),
+`1920x1080` only 30 fps. Any other framerate → `not-negotiated (-4)`.
+
+### 7.13.3 ✅✅ FULL TX1 PARITY — 5‑camera grid @ 680 Mbps (2026‑06‑14)
+
+`captures/tx2_grid_5cam.mp4` — **1920×720 2×3 grid, ~30 fps, 38.7 s, all 5 cameras distinct** (A topleft,
+C top‑mid, **D top‑right**, E bottom‑left, F bottom‑mid; B = black, no camera). The TX2 equivalent of the TX1
+5‑cam grid, achieved.
+
+**What it took (and the honest cause analysis):**
+- **Rebuilt the kernel to 680 Mbps** (patch `0001`'s mode‑table change — the board had been reverted to 912):
+  `imx219_mode_tbls.h` PLL `0x0307 0x39→0x2B`, `0x030D 0x72→0x55` for modes 0–4 → Image `4.9.337-tegra #8`.
+  Deployed with the matching **680 + position** DTB (`tegra186-j106-modes-pos.dtb`) as `extlinux LABEL
+  j106-680` (now `DEFAULT`; `j106pos`/`j106cam` kept as fallback). This is the rate that runs reliably on TX1.
+- **BUT the 5‑cam blocker was NOT the CSI link.** Both 912 and 680 showed **0 `PXL_SOF` errors** during the
+  grid. The actual blocker was an **Argus 5‑session startup negotiation race**: starting 5 `nvarguscamerasrc`
+  simultaneously, one random source intermittently fails `Internal data stream error` / `not-negotiated (-4)`
+  (4 sources are reliable; 5 races). Recovered by: **a boot where D enumerates** (§4.4 lottery) + **restart
+  `nvargus-daemon`** + **retry until a clean start** (it succeeded on the next attempt; ~1 in N tries). So
+  680 is the *safer, TX1‑matching* rate and is now default, but the thing that unblocked the 5‑cam grid was
+  the daemon‑restart + retry, not the link rate. A scripted retry loop (restart daemon → launch → if no
+  ERROR in 9 s, record 30 s; else retry) reliably lands a clean 30 s+ capture.
+- **Remaining caveat:** D's enumeration is still a per‑boot lottery (§4.4 carrier address‑shifter quirk), and
+  the 5‑cam start still needs the retry loop. Both are intermittent‑hardware/Argus quirks, not the aliasing
+  (fixed §7.13) and not a config bug.

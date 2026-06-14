@@ -23,3 +23,9 @@ Image
 
 # Claude settings
 .claude/
+
+# R32.2.1 BSP comparison (large, reproducible from public sources)
+bsp-r32.2/official/
+bsp-r32.2/auvidea/
+bsp-r32.2/*.dts
+bsp-r32.2/*.log

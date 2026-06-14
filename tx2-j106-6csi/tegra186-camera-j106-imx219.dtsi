@@ -687,8 +687,8 @@
 		modules {
 			module0 {
 				status = "okay";
-				badge = "j106_csi_a_imx219";
-				position = "rear";
+				badge = "imx219_topleft_csia";
+				position = "topleft";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
@@ -704,8 +704,8 @@
 			};
 			module1 {
 				status = "okay";
-				badge = "j106_csi_b_imx219";
-				position = "rear";
+				badge = "imx219_topright_csib";
+				position = "topright";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
@@ -721,8 +721,8 @@
 			};
 			module2 {
 				status = "okay";
-				badge = "j106_csi_c_imx219";
-				position = "rear";
+				badge = "imx219_centerleft_csic";
+				position = "centerleft";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
@@ -738,8 +738,8 @@
 			};
 			module3 {
 				status = "okay";
-				badge = "j106_csi_d_imx219";
-				position = "rear";
+				badge = "imx219_centerright_csid";
+				position = "centerright";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
@@ -755,8 +755,8 @@
 			};
 			module4 {
 				status = "okay";
-				badge = "j106_csi_e_imx219";
-				position = "rear";
+				badge = "imx219_bottomleft_csie";
+				position = "bottomleft";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
@@ -772,8 +772,8 @@
 			};
 			module5 {
 				status = "okay";
-				badge = "j106_csi_f_imx219";
-				position = "rear";
+				badge = "imx219_bottomright_csif";
+				position = "bottomright";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
