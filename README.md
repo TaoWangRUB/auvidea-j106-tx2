@@ -607,6 +607,11 @@ stock `Image` are never modified.
 
 ## 7. Status & open issues
 
+**Deployed config — default boot `j106-680`** (reversible via `extlinux` LABELs; fallbacks kept):
+`Image.j106-680` (4.9.337‑tegra, patch `0001` = shared reset + **680 Mbps**) + `tegra186-j106-modes-pos.dtb`
+(6 cameras, **unique positions**, 680 timing/derated framerates, USB VBUS fix, `usb2-0` = `otg`). Board:
+`ssh nvidia@10.42.0.157` (pw `nvidia`); board sudo `echo nvidia | sudo -S …`.
+
 ### ✅ Working
 - **USB host ports** (M110) — VBUS fix in `override-usb.dtsi` (stock routes VBUS through devkit
   `pca953x` expanders absent on the carrier → `‑517` defer; fixed regulator forced always‑on).
