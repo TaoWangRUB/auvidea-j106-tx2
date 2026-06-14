@@ -614,21 +614,25 @@ stock `Image` are never modified.
 - **Cameras** — all wired sensors stream raw V4L2 and through Argus; aliasing fixed (Stage 5.4);
   **5‑camera Argus grid** delivered ([`captures/tx2_grid_5cam.mp4`](captures/tx2_grid_5cam.mp4)).
 - **UART0 debug console** — works: `/dev/ttyUSB0` @ 115200 8N1 on the host (FTDI on the debug header).
-- **Micro‑USB device mode (USB0/OTG)** — **FIXED** (`override-usb.dtsi`). This is the USB0 port (J106 →
-  M110 connector **J17**), *separate* from UART0. Stock `usb2-0` is `mode="otg"` with VBUS/ID detect on
-  **devkit GPIOs** the carrier doesn't wire (M110 `USB0_ID` floats), so `xudc@3550000` stayed in ELPG and
-  nothing enumerated. Fix: force `ports/usb2-0 mode="device"` so `xudc` owns the port unconditionally (TX1
-  instead used PMU VBUS detection — same idea, carrier‑independent). Verified on the board: `usb2-0` now
-  `mode=device`, `xudc` active, the L4T gadget (`acm.GS0` + `rndis/ncm` + `mass_storage`) is **bound to UDC
-  `3550000.xudc`**, `/dev/ttyGS0` present. → On a host PC the micro‑USB enumerates as **`/dev/ttyACM0`**
-  (serial console) **+ `192.168.55.1`** (USB‑net). **Not** `ttyS0` (that's UART0, a different link).
-
 ### ◑ Intermittent (hardware/Argus quirks, not config bugs)
 - **South cameras B/D (`0x12`) per‑boot enumeration lottery** — Stage 1 caveat. D comes up some boots,
   not others; recovered by reboot. B has no physical sensor.
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open
+- **Micro‑USB device mode on the M110 (`/dev/ttyACM0` gadget) — configured but does not enumerate.** This is
+  USB0/OTG (J106 → M110 **J17**), *separate* from UART0. `override-usb.dtsi` forces `usb2-0 mode="device"`,
+  and verified on the board the gadget binds (`acm.GS0` + `rndis/ncm` + `mass_storage` on UDC
+  `3550000.xudc`, `/dev/ttyGS0` present). **But it never goes online on a host** — dmesg shows
+  `tegra-xudc 3550000.xudc: vbus state: 0` and `extcon@1: USB_HOST=1`: the OTG ID/VBUS detect (stock devkit
+  GPIOs, floating on the M110) reads the port as **host** and xudc never sees the host's VBUS, so it stays in
+  ELPG. With the micro‑USB connected to a PC, the host sees nothing. This is the §7.1a **M110 OTG‑routing
+  limitation** (host VBUS not routed to a Tegra VBUS sense, ID not floated to B‑device), confirmed at register
+  level — not a software bug. Forcing pure‑device by removing xudc's `extcon`/`otg-controller` breaks the
+  padctl (`failed to setup XUSB ports: -517`), so it is not done. *When it does work* (a devkit‑wired
+  micro‑USB such as the **XCB‑Lite**, "function identical to devkit"), it enumerates as **`/dev/ttyACM0`** +
+  `192.168.55.1` — **not** `ttyS0` (that's UART0). Remaining options: route the M110 host VBUS to the Tegra
+  VBUS sense + float ID (hardware), or use the XCB‑Lite micro‑USB.
 - **Carrier buttons.** The DT **does** carry the stock devkit `gpio-keys` (power / volume / sw\_wake →
   registers an input device), and the XCB‑Lite breakout's Power/Reset/Sleep/Recovery keys are documented as
   *"function identical to the devkit"* (XCB‑Lite ref §4.8) — so on a devkit/XCB‑Lite‑wired carrier the Power

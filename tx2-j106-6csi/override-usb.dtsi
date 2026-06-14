@@ -14,16 +14,22 @@
 
 /* Micro-USB / OTG device mode (USB0 leaves the J106 via M110 connector J17).
  *
- * Stock usb2-0 is mode="otg"; its VBUS/ID detect lives on devkit GPIOs that the
- * carrier does not wire (M110 USB0_ID floats, host VBUS not routed to a detect
- * GPIO), so extcon never reports "attached", xudc@3550000 stays in ELPG and the
- * micro-USB never enumerates on a host PC.
+ * Force usb2-0 to DEVICE mode so the xudc device controller owns the port and the
+ * L4T usb-device-mode gadget (acm.GS0 + rndis/ncm + mass_storage) binds to the UDC.
+ * Verified on the board: usb2-0 mode=device, xudc active, gadget bound to
+ * UDC 3550000.xudc, /dev/ttyGS0 present. On a properly OTG-wired carrier this makes
+ * the micro-USB enumerate on a host PC as /dev/ttyACM0 (serial console) +
+ * 192.168.55.1 (USB net) — NOT ttyS0 (that is UART0, a separate link).
  *
- * Fix: force the port to DEVICE mode so xudc owns it unconditionally. The L4T
- * usb-device-mode gadget (acm.GS0 + rndis/ncm + mass_storage) then binds to the
- * UDC, and the host sees /dev/ttyACM0 (serial console) + 192.168.55.1 (USB net).
- * (The working TX1 BSP instead used PMU VBUS detection; on tegra186 the clean
- * carrier-independent equivalent is simply mode="device".)
+ * ⚠️ On the M110 (J17) it still does NOT enumerate: dmesg shows
+ *    `tegra-xudc 3550000.xudc: vbus state: 0`  and  `extcon@1: USB_HOST=1`
+ * i.e. the OTG ID/VBUS detect (stock devkit GPIOs, floating on the carrier) reads
+ * the port as HOST and xudc never sees the host's VBUS, so it stays in ELPG and the
+ * gadget never goes online. This is the §7 / §7.1a M110 OTG-routing limitation, not
+ * a software bug — confirmed at register level. (Stripping xudc's extcon/otg-controller
+ * to force pure-device instead breaks the padctl with -517, so it is NOT done here.)
+ * The working TX1 BSP avoided this by using PMU VBUS detection; on a devkit-wired
+ * micro-USB (e.g. XCB-Lite, "function identical to devkit") this binding works as-is.
  */
 &{/xusb_padctl@3520000/ports/usb2-0} {
 	mode = "device";
