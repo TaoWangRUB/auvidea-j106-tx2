@@ -531,6 +531,31 @@ This was the **real "no frames" blocker.** Symptom: `NVCSI INTR_STATUS 0x8 = PP_
 [`captures/tx2_grid_5cam.mp4`](captures/tx2_grid_5cam.mp4) — 2×3 grid, 30 fps, ~38 s, 5 distinct cameras
 (A, C, D, E, F; B has no sensor) — the TX2 equivalent of the TX1 grid.
 
+### Stage 5b — ISP image quality (Argus) — tuning, since there is no IMX219 ISP override on TX2
+
+Out of the box the Argus images are **hazy / washed‑out with a magenta cast** — because libargus runs with
+**no IMX219 ISP tuning file** (the daemon log searches `…/settings/*.isp` + `camera_overrides.isp` and finds
+none → generic defaults). NVIDIA ships IMX219 ISP tuning only for the **Nano/tegra210**, not for IMX219 on the
+**TX2 tegra186 ISP**, and the tuning is SoC‑specific so the TX1 tuning does **not** port. Two levers:
+
+1. **`nvarguscamerasrc` runtime params — the practical win.** This preset markedly improves contrast,
+   saturation and sharpness and removes most of the haze (verified — see
+   [`captures/isp_compare_before_after.jpg`](captures/isp_compare_before_after.jpg); contrast std 14.6 → 26.6,
+   green deficit 87 → 98):
+   ```
+   nvarguscamerasrc sensor-id=N \
+     saturation=1.5 \
+     tnr-mode=2 tnr-strength=1.0 \     # HighQuality temporal noise reduction
+     ee-mode=2 ee-strength=0.5 \       # edge enhancement (sharpness)
+     exposurecompensation=0.8          # lift the dim AE
+   # also available: wbmode, gainrange, ispdigitalgainrange, aeregion, exposuretimerange
+   ```
+   A faint magenta/warm **tint remains** — that axis lives in the ISP **color‑correction matrix**, which
+   `nvarguscamerasrc` cannot touch (`wbmode` only moves R/B colour temperature, not green/magenta tint).
+2. **Full colour control + lowest latency — bypass the ISP.** Raw V4L2 (RG10 Bayer) + a small **CUDA ISP**
+   (debayer → white balance → colour matrix → gamma) on the dmabuf gives deterministic colour *and* removes
+   the Argus latency — the natural next step (and the "simpler HW + lower latency" angle).
+
 ---
 
 ## 6. Build, apply the patch & flash
