@@ -29,6 +29,20 @@
 	regulator-boot-on;
 };
 
+/* Carrier HDMI 5V regulator — same absent-expander gate.
+ *
+ * vdd-hdmi (regulator@3) is gated by the same expander gpio. It is already marked
+ * always-on, but the fixed-regulator driver still defers trying to get the absent
+ * expander's GPIO, so the nvdisplay HDMI driver's regulator_get returns -517
+ * ("tegradc nvdisplay: couldn't get regulator vdd_hdmi_5v0, -517"). Drop the expander
+ * gpio (it's already always-on) so the regulator registers immediately and HDMI hot-plug
+ * works. (The residual "tegra_hdmi_tmds_range_read failed" is just the EDID read with no
+ * monitor attached — benign.)
+ */
+&{/fixed-regulators/regulator@3} {
+	/delete-property/ gpio;
+};
+
 /* Note on the micro-USB / OTG port (USB0 → M110 connector J17):
  *
  * We deliberately leave usb2-0 as stock `mode="otg"`. The Linux device-mode gadget

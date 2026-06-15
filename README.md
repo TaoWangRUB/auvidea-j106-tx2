@@ -680,6 +680,14 @@ stock `Image` are never modified.
   gpio, force the regulator always‑on): `pwm-fan` now probes, registers as a cooling device under
   `thermal-fan-est`, and the kernel **ramps the fan with temperature** (verified OFF at ~33 °C, `target_pwm=0`)
   — as on TX1.
+- **HDMI 5V regulator** — fixed in `override-usb.dtsi`. `vdd-hdmi` (`regulator@3`), gated by the same absent
+  expander, made nvdisplay defer with `couldn't get regulator vdd_hdmi_5v0, -517`. Dropping the expander gpio
+  clears it (the residual `tegra_hdmi_tmds_range_read failed` is just the EDID read with no monitor attached).
+
+> **Benign boot messages** (all expected on this carrier — absent devkit chips, not faults):
+> `pca953x 0-0074/0-0077 -121` (the routed‑around I²C GPIO expanders), `ina3221x 0-0042/0-0043 -121`
+> (devkit power monitors), `imx219 1-0012 -121` (camera B, no sensor), `eqos: failed to read
+> eqos_auto_cal_config` (Ethernet works), `tegra_hdmi_tmds_range_read failed` (no monitor).
 - **Ethernet** (M110, Tegra EQOS) and **WiFi** — stock, untouched.
 - **Cameras** — all wired sensors stream raw V4L2 and through Argus; aliasing fixed (Stage 5.4);
   **5‑camera Argus grid** delivered ([`captures/tx2_grid_5cam.mp4`](captures/tx2_grid_5cam.mp4)).
