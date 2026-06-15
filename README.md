@@ -543,14 +543,16 @@ wrong: neither the TX1 R24 BSP nor Auvidea's patches ship an `.isp` — confirme
 
 **The fix — a drop‑in ISP override (verified working on the TX2/tegra186):**
 The community **Arducam `camera_overrides.isp`** loads on tegra186 and corrects both the colour matrix and the
-black level. Before/after on the same camera ([`captures/isp_override_compare.jpg`](captures/isp_override_compare.jpg)):
+black level. Before/after on the same camera, override the only variable:
 
-| | mean | R/G/B | contrast (std) |
-|---|---|---|---|
-| no override | 94 | 101/**85**/95 (magenta, green‑low) | 10.7 (milky) |
-| with override | 86 | 89/**89**/81 (**neutral**, R=G) | **52.9** (≈5× contrast) |
+- **Port F** (content scene): [`captures/isp_F_compare.jpg`](captures/isp_F_compare.jpg) — washed purple haze →
+  natural (black connectors, warm desk, bright LEDs). R/G/B 97/**80**/89 → 64/**72**/57, contrast std 7.8 → **43** (≈5.5×).
+- **Camera A** (plain wall): [`captures/isp_override_compare.jpg`](captures/isp_override_compare.jpg) — R/G/B
+  101/**85**/95 (magenta) → 89/**89**/81 (neutral), contrast std 10.7 → **52.9** (≈5×).
+- **Multi‑cam grid**, override active: [`captures/tx2_grid_override10.mp4`](captures/tx2_grid_override10.mp4)
+  (natural colour) vs the default‑ISP grid [`captures/tx2_grid_10s.mp4`](captures/tx2_grid_10s.mp4) (purple haze).
 
-The magenta cast disappears (green deficit gone, the wall reads neutral) and the haze clears (real blacks).
+The magenta cast disappears (green deficit gone, neutral whites) and the haze clears (real blacks).
 Install (the file is in [`tools/nvcam-settings/camera_overrides.isp`](tools/nvcam-settings/); persists in the
 rootfs across reboots):
 ```bash
@@ -656,6 +658,9 @@ stock `Image` are never modified.
 - **Ethernet** (M110, Tegra EQOS) and **WiFi** — stock, untouched.
 - **Cameras** — all wired sensors stream raw V4L2 and through Argus; aliasing fixed (Stage 5.4);
   **5‑camera Argus grid** delivered ([`captures/tx2_grid_5cam.mp4`](captures/tx2_grid_5cam.mp4)).
+- **ISP image quality** — fixed with the Arducam `camera_overrides.isp` (Stage 5b); installed in
+  `/var/nvidia/nvcam/settings/`. Washed/magenta → natural colour + real contrast
+  ([`captures/isp_F_compare.jpg`](captures/isp_F_compare.jpg)).
 - **UART0 debug console** — works: `/dev/ttyUSB0` @ 115200 8N1 on the host (FTDI on the debug header).
 - **Micro‑USB recovery / flashing (M110 J17)** — works. `sudo reboot forced-recovery` (or the M110 recovery
   button via `tools/j106-recovery-key`) puts the board into RCM and the host enumerates it as
