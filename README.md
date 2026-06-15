@@ -611,11 +611,25 @@ dtc -I dts -O dtb -@ -o tegra186-j106.dtb tegra186-j106.dts 2> tegra186-j106.dtc
 # verify positions merged: dtc -I dtb -O dts tegra186-j106.dtb | grep -A1 'module[0-5] {' | grep position
 ```
 
-### 6.4 Deploy reversibly (over SSH)
+### 6.4 Deploy reversibly (over SSH) — all fixes in one shot
+
+**One‑command deploy** ([`tools/deploy-j106.sh`](tools/)) — pushes and installs **all** carrier fixes
+(patched Image, carrier DTB, extlinux entry, **`camera_overrides.isp`** ISP fix, and the recovery‑button
+service) in one go, reversibly:
 ```bash
-# copy artifacts to the board /tmp, then on the board:
+tools/deploy-j106.sh  j106build/r3276/kout/arch/arm64/boot/Image  j106build/tegra186-j106.dtb
+# then reboot the board to apply. Env: TARGET=, SSHOPTS=-o ProxyJump=…, SUDOPW=, LABEL=
+```
+It runs [`tools/j106-install.sh`](tools/) on the board, which: installs the Image+DTB, adds an `extlinux`
+`LABEL` (sets it `DEFAULT`, backs up the prior conf), drops `camera_overrides.isp` into
+`/var/nvidia/nvcam/settings/` (+ clears `nvcam_cache_*.bin`), and enables `j106-recovery-key.service`.
+
+**Manual equivalent** (if you prefer step‑by‑step):
+```bash
 sudo cp /tmp/Image            /boot/Image.j106-680
 sudo cp /tmp/tegra186-j106.dtb /boot/tegra186-j106.dtb
+sudo install -m664 -o root -g root tools/nvcam-settings/camera_overrides.isp /var/nvidia/nvcam/settings/
+sudo rm -f /var/nvidia/nvcam/settings/nvcam_cache_*.bin           # ISP image-quality fix (§5b)
 sudo cp /boot/extlinux/extlinux.conf /boot/extlinux/extlinux.conf.bak     # first time only
 # append a new LABEL (keep the previous one as fallback) and set DEFAULT to it:
 #   LABEL j106cam
@@ -627,6 +641,11 @@ sudo sed -i 's/^DEFAULT .*/DEFAULT j106cam/' /boot/extlinux/extlinux.conf
 sudo reboot
 ```
 (Board sudo password is `nvidia`: `echo nvidia | sudo -S <cmd>`.)
+
+**Full reflash instead?** Bake the same fixes into the rootfs *before* `flash.sh`: copy the patched `Image`
++ DTB into `Linux_for_Tegra/kernel/`, and the ISP override into the rootfs at
+`Linux_for_Tegra/rootfs/var/nvidia/nvcam/settings/camera_overrides.isp` (plus the recovery service files),
+so they ship in the flashed image.
 
 ### 6.5 Verify on target
 ```bash
