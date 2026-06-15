@@ -674,6 +674,12 @@ stock `Image` are never modified.
 ### ✅ Working
 - **USB host ports** (M110) — VBUS fix in `override-usb.dtsi` (stock routes VBUS through devkit
   `pca953x` expanders absent on the carrier → `‑517` defer; fixed regulator forced always‑on).
+- **Fan control** — fixed in `override-usb.dtsi`. Stock gates `vdd-fan` (`regulator@13`) through the
+  *same* absent devkit I²C expander, so the regulator never registers → `FAN: couldn't get the regulator`
+  → `pwm-fan` won't probe → no PWM control → fan stuck **always on at full**. Same fix (drop the expander
+  gpio, force the regulator always‑on): `pwm-fan` now probes, registers as a cooling device under
+  `thermal-fan-est`, and the kernel **ramps the fan with temperature** (verified OFF at ~33 °C, `target_pwm=0`)
+  — as on TX1.
 - **Ethernet** (M110, Tegra EQOS) and **WiFi** — stock, untouched.
 - **Cameras** — all wired sensors stream raw V4L2 and through Argus; aliasing fixed (Stage 5.4);
   **5‑camera Argus grid** delivered ([`captures/tx2_grid_5cam.mp4`](captures/tx2_grid_5cam.mp4)).

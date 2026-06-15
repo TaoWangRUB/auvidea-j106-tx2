@@ -12,6 +12,23 @@
 	regulator-boot-on;
 };
 
+/* Carrier FAN regulator — same absent-expander issue as USB above.
+ *
+ * vdd-fan (regulator@13) is also gated by a GPIO on the devkit's pca9539 I2C expander
+ * (the same chip, absent on the J106/M110). So the regulator never registers →
+ * "FAN: coudln't get the regulator" → the `pwm-fan` driver fails to probe (stays
+ * unbound) → no PWM control interface → the fan runs uncontrolled at full speed.
+ * Same fix: drop the expander gpio, force the regulator always-on. Then pwm-fan probes,
+ * registers as a cooling device under thermal-fan-est, and the kernel ramps the fan with
+ * temperature (off when cool, spins up under load) — as on TX1. Verified: at ~33 °C the
+ * fan is now OFF (target_pwm=0, RPM=0) instead of always‑on.
+ */
+&{/fixed-regulators/regulator@13} {
+	/delete-property/ gpio;
+	regulator-always-on;
+	regulator-boot-on;
+};
+
 /* Note on the micro-USB / OTG port (USB0 → M110 connector J17):
  *
  * We deliberately leave usb2-0 as stock `mode="otg"`. The Linux device-mode gadget
