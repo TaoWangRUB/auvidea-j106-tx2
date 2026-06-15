@@ -531,30 +531,43 @@ This was the **real "no frames" blocker.** Symptom: `NVCSI INTR_STATUS 0x8 = PP_
 [`captures/tx2_grid_5cam.mp4`](captures/tx2_grid_5cam.mp4) — 2×3 grid, 30 fps, ~38 s, 5 distinct cameras
 (A, C, D, E, F; B has no sensor) — the TX2 equivalent of the TX1 grid.
 
-### Stage 5b — ISP image quality (Argus) — tuning, since there is no IMX219 ISP override on TX2
+### Stage 5b — ISP image quality (Argus): the missing IMX219 tuning, and the fix
 
-Out of the box the Argus images are **hazy / washed‑out with a magenta cast** — because libargus runs with
-**no IMX219 ISP tuning file** (the daemon log searches `…/settings/*.isp` + `camera_overrides.isp` and finds
-none → generic defaults). NVIDIA ships IMX219 ISP tuning only for the **Nano/tegra210**, not for IMX219 on the
-**TX2 tegra186 ISP**, and the tuning is SoC‑specific so the TX1 tuning does **not** port. Two levers:
+Out of the box the Argus images are **hazy / washed‑out with a magenta cast**. Root cause (verified against
+sources): the ISP colour tuning lives in a **`camera_overrides.isp`** file in `/var/nvidia/nvcam/settings/`
+(loaded by libargus) — **not** in the imx219 driver (Auvidea's TX1 driver patch only adds sensor modes, no
+colour). IMX219 is a *reference* sensor on **tegra210** (Nano/TX1 = the RPi Camera v2), so its tuning is
+built into that camera stack; on **tegra186 (TX2)** IMX219 was never a reference camera, so there's **no
+built‑in tuning** → generic defaults → the washed/magenta look. (My earlier note that "Auvidea is tuned" was
+wrong: neither the TX1 R24 BSP nor Auvidea's patches ship an `.isp` — confirmed, both have 0.)
 
-1. **`nvarguscamerasrc` runtime params — the practical win.** This preset markedly improves contrast,
-   saturation and sharpness and removes most of the haze (verified — see
-   [`captures/isp_compare_before_after.jpg`](captures/isp_compare_before_after.jpg); contrast std 14.6 → 26.6,
-   green deficit 87 → 98):
-   ```
-   nvarguscamerasrc sensor-id=N \
-     saturation=1.5 \
-     tnr-mode=2 tnr-strength=1.0 \     # HighQuality temporal noise reduction
-     ee-mode=2 ee-strength=0.5 \       # edge enhancement (sharpness)
-     exposurecompensation=0.8          # lift the dim AE
-   # also available: wbmode, gainrange, ispdigitalgainrange, aeregion, exposuretimerange
-   ```
-   A faint magenta/warm **tint remains** — that axis lives in the ISP **color‑correction matrix**, which
-   `nvarguscamerasrc` cannot touch (`wbmode` only moves R/B colour temperature, not green/magenta tint).
-2. **Full colour control + lowest latency — bypass the ISP.** Raw V4L2 (RG10 Bayer) + a small **CUDA ISP**
-   (debayer → white balance → colour matrix → gamma) on the dmabuf gives deterministic colour *and* removes
-   the Argus latency — the natural next step (and the "simpler HW + lower latency" angle).
+**The fix — a drop‑in ISP override (verified working on the TX2/tegra186):**
+The community **Arducam `camera_overrides.isp`** loads on tegra186 and corrects both the colour matrix and the
+black level. Before/after on the same camera ([`captures/isp_override_compare.jpg`](captures/isp_override_compare.jpg)):
+
+| | mean | R/G/B | contrast (std) |
+|---|---|---|---|
+| no override | 94 | 101/**85**/95 (magenta, green‑low) | 10.7 (milky) |
+| with override | 86 | 89/**89**/81 (**neutral**, R=G) | **52.9** (≈5× contrast) |
+
+The magenta cast disappears (green deficit gone, the wall reads neutral) and the haze clears (real blacks).
+Install (the file is in [`tools/nvcam-settings/camera_overrides.isp`](tools/nvcam-settings/); persists in the
+rootfs across reboots):
+```bash
+sudo cp camera_overrides.isp /var/nvidia/nvcam/settings/camera_overrides.isp
+sudo chmod 664 /var/nvidia/nvcam/settings/camera_overrides.isp
+sudo chown root:root /var/nvidia/nvcam/settings/camera_overrides.isp
+sudo rm -f /var/nvidia/nvcam/settings/nvcam_cache_*.bin    # force re-read
+sudo systemctl restart nvargus-daemon
+```
+> ⚠️ The daemon logs two non‑fatal warnings (`Invalid isp config attribute: em.preset[*].wbgains=…`) — a few
+> preset attributes from a different L4T version are ignored, but the core CCM/black‑level/tone tuning applies.
+> Arducam notes the tuning isn't lens‑specific (NVIDIA hasn't opened CamTune), so it's a strong baseline, not a
+> perfect calibration.
+
+Further options (now optional, not required): `nvarguscamerasrc` runtime params (`saturation`, `tnr`, `ee`,
+`exposurecompensation`) on top of the override for extra punch; or raw V4L2 + a custom **CUDA ISP**
+(debayer → WB → CCM → gamma) for full control + lowest latency (the "simpler HW + lower latency" route).
 
 ---
 
