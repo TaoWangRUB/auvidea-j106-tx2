@@ -141,8 +141,19 @@ echo nvidia | sudo -S systemctl start nvargus-daemon
 - **Load-insensitive at both resolutions.** 5 cameras concurrent gives the same per-stream latency as
   1 (1080p: 30.3 vs 30.5 ms; 720p: 21.6 vs 22.2 ms). Readout is fixed by the sensor; the TX2 ISP has
   ample headroom. (Stagger session starts ~1.5 s apart so all 5 survive the Argus start race.)
-- **Perceived glass-to-glass (full 5-camera grid, 720p) measured ~110 ms** by filming an on-screen
-  ms-clock at 240 fps. Of that, the camera capture+ISP is only ~22 ms; the rest is **exposure +
-  `nvcompositor` (waits for all 5 unsynced inputs) + two display passes** (the clock must be shown,
-  then the camera's view of it). To cut latency, attack **exposure** (more light / cap AE), the
-  **compositor/display**, and **readout** (lower res / higher MIPI rate) — not the ISP.
+- **Perceived glass-to-glass (full 5-camera grid, 720p) measured ~110 ms.** Method (external timer):
+  a phone shows a running ms-clock; a J106 CSI camera films the phone; that camera's tile renders in
+  the grid on the TX2 screen; a second camera films **both the phone and the TX2 screen** in one
+  frame at 240 fps. Latency = `phone time − time shown in the TX2 tile`. The phone's own display
+  latency **cancels** (both the live phone value and the tile are captured as phone photons in the
+  same frame), so it is *not* in the number — the measurement is clean. The path is therefore a
+  **single** TX2 display pass, not two. Budget of the ~110 ms:
+  - exposure (filming the bright phone, AE-short) ~5–15 ms
+  - **camera capture + ISP ~22 ms** (measured)
+  - `nvcompositor` (waits for all 5 unsynced inputs, ≥1 frame) ~16–33 ms
+  - **TX2 display via `nv3dsink` ~33–50 ms** — *not* a raw scanout: GL → an X-composited desktop
+    window → scanout, so it buffers ~2–3 frames. This is the biggest non-camera contributor.
+
+  So the camera path is only ~1/5 of the perceived latency. To cut it: use a **direct KMS/overlay
+  sink (no X)** instead of `nv3dsink` (saves the most), drop **exposure** (more light / cap AE), and
+  reduce the **compositor** cost — not the ISP.
