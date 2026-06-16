@@ -147,12 +147,17 @@ echo nvidia | sudo -S systemctl start nvargus-daemon
   frame at 240 fps. Latency = `phone time − time shown in the TX2 tile`. The phone's own display
   latency **cancels** (both the live phone value and the tile are captured as phone photons in the
   same frame), so it is *not* in the number — the measurement is clean. The path is therefore a
-  **single** TX2 display pass, not two. Budget of the ~110 ms:
-  - exposure (filming the bright phone, AE-short) ~5–15 ms
-  - **camera capture + ISP ~22 ms** (measured)
-  - `nvcompositor` (waits for all 5 unsynced inputs, ≥1 frame) ~16–33 ms
-  - **TX2 display via `nv3dsink` ~33–50 ms** — *not* a raw scanout: GL → an X-composited desktop
-    window → scanout, so it buffers ~2–3 frames. This is the biggest non-camera contributor.
+  **single** TX2 display pass, not two.
+
+  Budget of the ~110 ms (720p, 5-camera grid):
+
+  | Stage | ~latency | notes |
+  |---|---|---|
+  | exposure | ~5–15 ms | AE-short (filming the bright phone) |
+  | **camera capture + ISP** | **~22 ms** | measured (15.7 ms readout + ~6 ms ISP/overhead) |
+  | `nvcompositor` | ~16–33 ms | waits for all 5 unsynced inputs (≥1 frame) |
+  | **TX2 display via `nv3dsink`** | **~33–50 ms** | GL → X-composited desktop window → scanout (~2–3 frames buffered); biggest non-camera cost |
+  | **Total** | **~80–115 ms** | matches the measured ~110 ms |
 
   So the camera path is only ~1/5 of the perceived latency. To cut it: use a **direct KMS/overlay
   sink (no X)** instead of `nv3dsink` (saves the most), drop **exposure** (more light / cap AE), and
