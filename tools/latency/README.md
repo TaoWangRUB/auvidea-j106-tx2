@@ -124,21 +124,23 @@ echo nvidia | sudo -S systemctl start nvargus-daemon
 
 ---
 
-## 6. Results (measured 2026-06-16, IMX219 on J106/TX2, single stream @30fps)
+## 6. Results (measured 2026-06-16, IMX219 on J106/TX2, @30fps)
 
 | Config | SOF→ISP-done (mean) | readout | ISP/overhead | std |
 |---|---|---|---|---|
-| **1080p** (mode 2) | **30.5 ms** | 27.4 ms | 3.1 ms | 1.0 ms |
-| **720p** (mode 4 → 640×360, as the display grid uses) | **22.2 ms** | 15.7 ms | 6.5 ms | 0.6 ms |
-| 1080p, 5 cameras concurrent | 30.3 ms | 27.4 ms | 2.9 ms | 0.4 ms |
+| **1080p** (mode 2), 1 camera | **30.5 ms** | 27.4 ms | 3.1 ms | 1.0 ms |
+| 1080p (mode 2), 5 cameras concurrent | 30.3 ms | 27.4 ms | 2.9 ms | 0.4 ms |
+| **720p** (mode 4 → 640×360, the display-grid config), 1 camera | **22.2 ms** | 15.7 ms | 6.5 ms | 0.6 ms |
+| 720p (mode 4 → 640×360), 5 cameras concurrent | 21.6 ms | 15.7 ms | 5.9 ms | 0.7 ms |
 
 **Findings**
 - **Latency is sensor-readout-bound, not ISP-bound.** At 1080p, 27.4 of the 30.5 ms is **sensor
   readout** (clocking the frame out over the 2-lane MIPI link); the **ISP adds only ~3 ms**. At 720p
   the high-rate mode-4 readout is just 15.7 ms, so capture+ISP drops to ~22 ms. The intuition that
   "the ISP is the major cost" does not hold for this sensor.
-- **Load-insensitive.** 5 cameras concurrent gives the same per-stream latency as 1 (30.3 vs 30.5 ms).
-  Readout is fixed by the sensor; the TX2 ISP has ample headroom.
+- **Load-insensitive at both resolutions.** 5 cameras concurrent gives the same per-stream latency as
+  1 (1080p: 30.3 vs 30.5 ms; 720p: 21.6 vs 22.2 ms). Readout is fixed by the sensor; the TX2 ISP has
+  ample headroom. (Stagger session starts ~1.5 s apart so all 5 survive the Argus start race.)
 - **Perceived glass-to-glass (full 5-camera grid, 720p) measured ~110 ms** by filming an on-screen
   ms-clock at 240 fps. Of that, the camera capture+ISP is only ~22 ms; the rest is **exposure +
   `nvcompositor` (waits for all 5 unsynced inputs) + two display passes** (the clock must be shown,
