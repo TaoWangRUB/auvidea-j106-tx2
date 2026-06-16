@@ -138,6 +138,12 @@ echo nvidia | sudo -S systemctl start nvargus-daemon
   readout** (clocking the frame out over the 2-lane MIPI link); the **ISP adds only ~3 ms**. At 720p
   the high-rate mode-4 readout is just 15.7 ms, so capture+ISP drops to ~22 ms. The intuition that
   "the ISP is the major cost" does not hold for this sensor.
+- **`isp_est` is a residual, not ISP compute.** It is `mean − readout`, so it lumps the real ISP work
+  together with a roughly **fixed Argus per-frame scheduling + event-delivery overhead (~5–6 ms)** that
+  does *not* scale with resolution. That is why 720p shows a *larger* `isp_est` (5.6 ms, no downscale;
+  6.5 ms with the 2× downscale to 640×360) than 1080p (3.1 ms) despite far fewer pixels — the downscale
+  adds only ~1 ms; the rest is the fixed overhead being a bigger share once the readout shrinks. Don't
+  read `isp_est` as ISP pixel-compute; the resolution-dependent cost is **readout**.
 - **Load-insensitive at both resolutions.** 5 cameras concurrent gives the same per-stream latency as
   1 (1080p: 30.3 vs 30.5 ms; 720p: 21.6 vs 22.2 ms). Readout is fixed by the sensor; the TX2 ISP has
   ample headroom. (Stagger session starts ~1.5 s apart so all 5 survive the Argus start race.)
