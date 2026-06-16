@@ -36,6 +36,8 @@ static void consumer_fn(){
 int main(int argc,char**argv){
     setvbuf(stdout,NULL,_IONBF,0);
     int sid=argc>1?atoi(argv[1]):0; int N=argc>2?atoi(argv[2]):150;
+    int modeIdx=argc>3?atoi(argv[3]):-1;                          // -1 = auto-find 1080p
+    int outW=argc>4?atoi(argv[4]):0, outH=argc>5?atoi(argv[5]):0; // 0 = sensor-mode resolution
     UniqueObj<CameraProvider> cp(CameraProvider::create());
     ICameraProvider* iProv=interface_cast<ICameraProvider>(cp);
     std::vector<CameraDevice*> devs; iProv->getCameraDevices(&devs);
@@ -44,10 +46,13 @@ int main(int argc,char**argv){
     ICameraProperties* iProps=interface_cast<ICameraProperties>(dev);
     std::vector<SensorMode*> modes; iProps->getAllSensorModes(&modes);
     SensorMode* mode=NULL; int mi=-1;
-    for(size_t i=0;i<modes.size();i++){ ISensorMode* im=interface_cast<ISensorMode>(modes[i]);
+    if(modeIdx>=0 && modeIdx<(int)modes.size()){ mode=modes[modeIdx]; mi=modeIdx; }   // explicit mode
+    else for(size_t i=0;i<modes.size();i++){ ISensorMode* im=interface_cast<ISensorMode>(modes[i]);
         Size2D<uint32_t> r=im->getResolution();
         if(r.width()==1920&&r.height()==1080){mode=modes[i];mi=(int)i;break;} }
-    printf("RESULT devices=%zu sid=%d modes=%zu 1080p_idx=%d\n",devs.size(),sid,modes.size(),mi);
+    uint32_t mw=0,mh=0; if(mode){ ISensorMode* im=interface_cast<ISensorMode>(mode); mw=im->getResolution().width(); mh=im->getResolution().height(); }
+    printf("RESULT devices=%zu sid=%d modes=%zu mode_idx=%d mode_res=%ux%u out=%dx%d\n",
+        devs.size(),sid,modes.size(),mi,mw,mh, outW?outW:(int)mw, outH?outH:(int)mh);
     UniqueObj<CaptureSession> sess(iProv->createCaptureSession(dev));
     ICaptureSession* iSess=interface_cast<ICaptureSession>(sess);
     if(!iSess){printf("RESULT no session\n");_exit(1);}
@@ -61,7 +66,8 @@ int main(int argc,char**argv){
     UniqueObj<OutputStreamSettings> oss(iSess->createOutputStreamSettings(STREAM_TYPE_EGL));
     IEGLOutputStreamSettings* ioss=interface_cast<IEGLOutputStreamSettings>(oss);
     ioss->setPixelFormat(PIXEL_FMT_YCbCr_420_888);
-    ioss->setResolution(mode?interface_cast<ISensorMode>(mode)->getResolution():Size2D<uint32_t>(1920,1080));
+    ioss->setResolution((outW>0&&outH>0)?Size2D<uint32_t>(outW,outH)
+        :(mode?interface_cast<ISensorMode>(mode)->getResolution():Size2D<uint32_t>(1920,1080)));
     ioss->setMode(EGL_STREAM_MODE_FIFO); ioss->setFifoLength(2);
     UniqueObj<OutputStream> stream(iSess->createOutputStream(oss.get()));
     g_stream=stream.get();

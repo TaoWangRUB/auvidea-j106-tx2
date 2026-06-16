@@ -96,13 +96,17 @@ Needs the L4T multimedia API headers (`/usr/src/jetson_multimedia_api/...`) and
 ## 5. Usage
 
 ```bash
-# Argus capture+ISP latency, sensor-id 0, 150 frames:
+./argus_evlat <sensor-id> <frames> [mode-idx] [out-w] [out-h]
+# 1080p (auto-selects sensor mode 2), 150 frames:
 ./argus_evlat 0 150
-# -> RESULT SOF->ISPdone n=135 mean=30.9 median=31.3 ... exposure=33.3 readout=27.4 isp_est=3.5 frames=0.93
+# 720p as used by the display grid (sensor mode 4 = 1280x720, downscaled to 640x360):
+./argus_evlat 0 150 4 640 360
+# -> RESULT SOF->ISPdone n=135 mean=30.5 ... readout=27.4 isp_est=3.1 frames=0.91
 ```
-Output fields (milliseconds): `mean/median/min/max/p95/std` of `SOF→ISP-done`; `exposure`
-(AE-selected, pre-SOF); `readout` (`getFrameReadoutTime`); `isp_est = mean − readout`
-(ISP+overhead); `frames = mean / 33.3ms`.
+Args: `mode-idx` (-1 = auto-find 1080p; otherwise the sensor-mode index from `getAllSensorModes`),
+`out-w`/`out-h` (EGL output size; 0 = the sensor-mode resolution). Output fields (milliseconds):
+`mean/median/min/max/p95/std` of `SOF→ISP-done`; `exposure` (AE-selected, pre-SOF); `readout`
+(`getFrameReadoutTime`); `isp_est = mean − readout` (ISP+overhead); `frames = mean / 33.3ms`.
 
 ```bash
 # raw V4L2 floor (ISP bypassed) — must stop the daemon first:
@@ -120,20 +124,23 @@ echo nvidia | sudo -S systemctl start nvargus-daemon
 
 ---
 
-## 6. Results (measured 2026-06-16, 1080p30, IMX219 on J106/TX2)
+## 6. Results (measured 2026-06-16, IMX219 on J106/TX2, single stream @30fps)
 
 | Config | SOF→ISP-done (mean) | readout | ISP/overhead | std |
 |---|---|---|---|---|
-| 1 camera | **30.9 ms** | 27.4 ms | 3.5 ms | 0.8 ms |
-| 5 cameras (concurrent) | **30.3 ms** | 27.4 ms | 2.9 ms | 0.4 ms |
+| **1080p** (mode 2) | **30.5 ms** | 27.4 ms | 3.1 ms | 1.0 ms |
+| **720p** (mode 4 → 640×360, as the display grid uses) | **22.2 ms** | 15.7 ms | 6.5 ms | 0.6 ms |
+| 1080p, 5 cameras concurrent | 30.3 ms | 27.4 ms | 2.9 ms | 0.4 ms |
 
 **Findings**
-- **Latency is sensor-readout-bound, not ISP-bound.** Of the ~31 ms, **27.4 ms is sensor readout**
-  (clocking the frame out over the 2-lane MIPI link at the J106's 680 Mbps/lane); the **ISP adds
-  only ~3 ms**. The intuition that "the ISP is the major cost" does not hold for this sensor/mode.
-- **Load-insensitive.** 5 cameras streaming concurrently gives the same per-stream latency as 1
-  (30.3 vs 30.9 ms — within noise). Readout is fixed by the sensor; the TX2 ISP has ample headroom.
-- **Composition (perceived glass-to-glass):** `exposure (~33 ms, AE) + 31 ms (capture+ISP) +
-  ~1 display refresh (16–33 ms) ≈ 80–95 ms`. To cut latency, lower the **exposure** (more light /
-  cap AE) and the **readout** (lower resolution / higher MIPI rate) — not the ISP.
-</content>
+- **Latency is sensor-readout-bound, not ISP-bound.** At 1080p, 27.4 of the 30.5 ms is **sensor
+  readout** (clocking the frame out over the 2-lane MIPI link); the **ISP adds only ~3 ms**. At 720p
+  the high-rate mode-4 readout is just 15.7 ms, so capture+ISP drops to ~22 ms. The intuition that
+  "the ISP is the major cost" does not hold for this sensor.
+- **Load-insensitive.** 5 cameras concurrent gives the same per-stream latency as 1 (30.3 vs 30.5 ms).
+  Readout is fixed by the sensor; the TX2 ISP has ample headroom.
+- **Perceived glass-to-glass (full 5-camera grid, 720p) measured ~110 ms** by filming an on-screen
+  ms-clock at 240 fps. Of that, the camera capture+ISP is only ~22 ms; the rest is **exposure +
+  `nvcompositor` (waits for all 5 unsynced inputs) + two display passes** (the clock must be shown,
+  then the camera's view of it). To cut latency, attack **exposure** (more light / cap AE), the
+  **compositor/display**, and **readout** (lower res / higher MIPI rate) — not the ISP.
