@@ -289,6 +289,14 @@ Probed the running board (`nvidia-desktop`, `192.168.0.168`) directly:
   sudo sh -c "echo 1 > /sys/class/gpio/gpio$G/value"
   ```
   (This is the manual equivalent of the gpio‑hog in the dtsi; it does **not** survive reboot.)
+  > ⚠️ **This sysfs export only works on the STOCK DTB.** On the deployed **carrier** DTB gpio 461 is
+  > claimed by the camera stack (the `j106-camera-reset-release` hog / the imx219 driver's
+  > `cam_reset_gpio`), so `echo 461 > /sys/class/gpio/export` fails with **`‑EBUSY`** (verified: exit 1,
+  > no `gpio461` node) — and `gpioset`/libgpiod likewise can't request a held line. Once the camera
+  > stack owns the pin, **only the driver can drive it**: that is why the reset edge lives in patch
+  > `0001` as the **boot pulse** (Stage 1.5) and the **`j106_reset_recover` sysfs** (Stage 1.6), not as
+  > a userspace gpio toggle. The sysfs toggle would also only make the *edge* — it wouldn't re‑probe the
+  > sensor (`echo 2-0012 > /sys/bus/i2c/drivers/imx219/bind`), which the driver recovery does for you.
 - **Cameras detected after reset release** (initially 4 connected):
   ```
   i2c-2 (3180000):  0x10  0x12     <-- CSI-C/D pair
@@ -454,7 +462,7 @@ two device‑tree files plus **one** driver patch — nothing else is rebuilt:
 |---|---|
 | [`tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi`](tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi) | the 6 cameras: sensors, reset hog, MCLK pinmux, NVCSI/VI channels, sensor modes, `tegra-camera-platform` (Argus) |
 | [`tx2-j106-6csi/override-usb.dtsi`](tx2-j106-6csi/override-usb.dtsi) | USB VBUS (host) + OTG device‑mode |
-| [`patches/0001-imx219-share-reset-gpio-j106.patch`](patches/0001-imx219-share-reset-gpio-j106.patch) | imx219 driver: shared reset GPIO **and** 680 Mbps MIPI rate |
+| [`patches/0001-imx219-share-reset-gpio-j106.patch`](patches/0001-imx219-share-reset-gpio-j106.patch) | imx219 driver: shared reset GPIO (no assert/free) + **boot-time reset pulse** (port-D shifter fix) + **`j106_reset_recover` sysfs** (reboot-free recovery) + 680 Mbps MIPI rate |
 
 Capture path (3‑hop on tegra186):
 `sensor (imx219 @0x10/0x12) → NVCSI@150c0000 channel@N → VI@15700000 port@N → /dev/videoN`, then
@@ -471,12 +479,14 @@ the carrier address‑shifter (shift = 2) puts the "south" sensor of each pair a
 | 1.2 | The R32 *tegracam* `imx219` driver makes `reset-gpios` **mandatory** and `gpio_request()`s it **exclusively** (one consumer/pin). The J106 ties **all 6** resets to **one** line → only the first sensor probes, the rest fail `‑EBUSY/‑16`; and any sensor open/close/crash resets all six. | **Driver patch `0001`:** treat `‑EBUSY` as success, never free the line, and **never drive it low** (release once, leave high — mirroring the working TX1 BSP). |
 | 1.3 | The shared reset must be released once and held high. A gpio‑hog **named like the stock disabled `camera-control-output-high` hog silently merges and does nothing**. | Unique gpio‑hog `j106-camera-reset-release` on `TEGRA_MAIN_GPIO(R,5)` = gpio 461 (dtsi). |
 | 1.4 | Stock DTB carries **PCA9546/PCA9548 i²c muxes** at `0x70`/`0x77` on the camera buses. The J106 address‑shifter responds to `0x70`; the mux driver claims it → the shifted **`0x12` south cameras never ACK** (even with the mux `disabled`). | `/delete-node/ tca9546@70; tca9548@77;` (i2c‑2) and `i2cmux@70;` (i2c‑1); also delete colliding devkit sensors (`ov23850_a@10`, `ov5693_c@36`, `ov23850_c@36`). |
+| 1.5 | **Port‑D per‑boot lottery (FIXED).** The south `0x12` camera on the bare‑J106 **bus‑2** (CSI‑D / `2-0012`) only enumerates on some boots: raw i²c **`‑121`** (no ACK), and the bus‑2 shifter companion `0x0c` is absent too — the **address‑shifter doesn't latch "shift" mode** without a clean reset **edge**. The gpio‑hog (1.3) only *holds* reset high; it never gives the **low→high pulse** the [J106 Technical Reference p.7](J106_technical_reference_1.0.pdf) explicitly requires (*"toggle it low briefly … so the cameras are reset properly at power up"*, then `i2cdetect -y -r 2`). | **Driver patch `0001`:** on the **first** `power_on` (boot, pre‑stream), pulse the shared reset **low ~12 ms → high** — one clean edge for all shifters (static‑flag guarded, never pulses during streaming). Verified **10/10 reboots** port‑D up (was ~2/6 down before). Plus a **`j106_reset_recover` sysfs** for reboot‑free recovery (1.6). |
+| 1.6 | If port‑D ever fails to enumerate **or** wedges mid‑stream, the only prior recovery was a reboot — userspace **can't** pulse gpio 461 (the driver/hog owns it → `/sys/class/gpio` export returns `‑EBUSY`; `imx219` is built‑in so no rmmod). | **Driver patch `0001`:** write‑only sysfs created on every **successfully‑bound** cam — `echo 1 \| sudo tee /sys/bus/i2c/devices/<bound-imx219>/j106_reset_recover` re‑pulses the shared reset (same low→high edge) **and** re‑probes every present‑but‑unbound `imx219` (`bus_for_each_dev`→`device_attach`). **A sensor that failed its own boot probe has no recover file of its own — trigger it from any *sibling* camera** (e.g. recover port D via `2-0010`/port C). Verified live: drop `2-0012` (no driver, no own recover file) → trigger from `2-0010` → `2-0012` re‑binds + streams. *Caveat:* shared line → briefly resets all 6 cams; on‑demand recovery, not mid‑capture. |
 
-> **Intermittent caveat (open):** even with 1.4, the south `0x12` cameras (B, D) are a **per‑boot
-> lottery** — the bare‑J106 bus‑2 shifter sometimes fails to present `0x12` (`i2c read probe ‑121`).
-> The M110 bus (E/F) has a robust translator (`0x43` + EEPROM `0x50`) and always works. Recovered by
-> reboot / reset / power‑cycle; **not** a cable/reseat issue and **not** i²c speed (F runs `0x12` fine at
-> 400 kHz). Camera **B has no physical sensor** on this rig regardless.
+> **South `0x12` shifter — now deterministic (was an open per‑boot lottery).** The M110 bus (E/F) has a
+> robust translator (`0x43` + EEPROM `0x50`) and always worked; the **bare‑J106 bus‑2** shifter (C/D)
+> needed the documented reset **edge** — supplied by 1.5/1.6. It was **not** a cable/reseat issue and
+> **not** i²c speed (F runs `0x12` fine at 400 kHz). Camera **B has no physical sensor** on this rig
+> regardless (its `1-0012` `‑121` is expected).
 
 ### Stage 2 — MCLK (24 MHz)
 
@@ -658,6 +668,15 @@ v4l2-ctl -d /dev/video0 --set-ctrl sensor_mode=2 --set-fmt-video=width=1920,heig
 sudo systemctl restart nvargus-daemon
 ```
 
+> **Live grid on the HDMI screen:** use [`tools/grid-display-x.sh`](tools/grid-display-x.sh) (5 cams +
+> placeholder, 2×3). It renders with **`nv3dsink`** (an X window). Do **not** use the older
+> `nvoverlaysink`-based grid while the desktop is up: the NVIDIA Xorg driver owns the display controller,
+> so the legacy overlay plane can't be acquired and the pipeline never reaches PLAYING (it also throws a
+> misleading `nvcompositor` "Impossible to configure latency" clock error). `nvoverlaysink` only works
+> from a text console with **X stopped**. A `queue` before each compositor sink pad is required to satisfy
+> live-source latency negotiation. Kill it by PID (`kill <gst-launch-pid>`) — a `pkill -f` pattern
+> containing `gst-launch`/`nvcompositor` will also match (and kill) your own ssh shell.
+
 ### 6.6 Rollback
 Set `DEFAULT` back to a previous LABEL (e.g. `j106usb` or `primary`) and reboot. The partition DTB and
 stock `Image` are never modified.
@@ -691,6 +710,13 @@ stock `Image` are never modified.
 - **Ethernet** (M110, Tegra EQOS) and **WiFi** — stock, untouched.
 - **Cameras** — all wired sensors stream raw V4L2 and through Argus; aliasing fixed (Stage 5.4);
   **5‑camera Argus grid** delivered ([`captures/tx2_grid_5cam.mp4`](captures/tx2_grid_5cam.mp4)).
+- **Port D (CSI‑D `2-0012`) reliability — FIXED** (Stage 1.5/1.6). Boot‑time shared‑reset **pulse**
+  (matching the J106 manual's documented power‑up reset) makes the bus‑2 shifter latch deterministically:
+  **10/10 reboots port‑D up** (was a per‑boot lottery, ~2/6 down). Reboot‑free recovery via
+  `echo 1 | sudo tee /sys/bus/i2c/devices/<bound-imx219>/j106_reset_recover` — trigger from **any bound
+  sibling** (a sensor that failed its boot probe has no recover file of its own); verified: drop port D →
+  recover via port C → re‑binds + streams. Deployed kernel: `Image.j106-680-rst` (extlinux `LABEL
+  j106-680-rst`, the new default).
 - **ISP image quality** — fixed with the Arducam `camera_overrides.isp` (Stage 5b); installed in
   `/var/nvidia/nvcam/settings/`. Washed/magenta → natural colour + real contrast
   ([`captures/isp_F_compare.jpg`](captures/isp_F_compare.jpg)).
@@ -703,8 +729,10 @@ stock `Image` are never modified.
   recovery via [`tools/j106-recovery-key`](tools/).
 
 ### ◑ Intermittent (hardware/Argus quirks, not config bugs)
-- **South cameras B/D (`0x12`) per‑boot enumeration lottery** — Stage 1 caveat. D comes up some boots,
-  not others; recovered by reboot. B has no physical sensor.
+- ~~**South cameras B/D (`0x12`) per‑boot enumeration lottery**~~ — **FIXED** by the boot‑time reset
+  pulse + `j106_reset_recover` sysfs (Stage 1.5/1.6, see Working). Port D now 10/10 reboots. The south
+  MIPI links (D, F) still log an occasional **non‑fatal** CIL `0x89` (D‑PHY) error at stream start —
+  recovered, does not wedge on the deployed 680 Mbps kernel. B has no physical sensor.
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open / hardware‑limited

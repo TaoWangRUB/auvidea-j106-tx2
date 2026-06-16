@@ -1,42 +1,84 @@
-Subject: [PATCH] imx219: J106 carrier support — shared reset GPIO + lower MIPI rate
+Subject: [PATCH] imx219: J106 carrier support — shared reset GPIO (boot pulse +
+ runtime recovery) + lower MIPI rate
 
-Two changes for the Auvidea J106 carrier with 6× IMX219 cameras on Jetson TX2.
+Changes for the Auvidea J106 carrier with 6× IMX219 cameras on Jetson TX2.
 
-1) Shared reset GPIO (imx219.c)
+1) Shared reset GPIO — never assert/free (imx219.c)
 
 On the J106 all 6 IMX219 CSI cameras share a SINGLE physical reset line
-(TEGRA_MAIN_GPIO(R,5) = sysfs gpio 461), released at boot by a gpio-hog. The
-stock tegracam imx219 driver assumes a PRIVATE per-sensor reset: it
-gpio_request()s the line EXCLUSIVELY, frees it on power_put, and drives it LOW
-on every power_on/power_off. With one shared line that breaks two ways:
-
-  1. sensors 2..6 fail probe with -EBUSY/-16 (the line is already owned);
-  2. opening/closing/crashing ONE sensor resets ALL the others mid-stream.
-
+(TEGRA_MAIN_GPIO(R,5) = sysfs gpio 461). The stock tegracam imx219 driver
+assumes a PRIVATE per-sensor reset: it gpio_request()s the line EXCLUSIVELY,
+frees it on power_put, and drives it LOW on every power_on/power_off. With one
+shared line that breaks two ways: sensors 2..6 fail probe with -EBUSY/-16, and
+opening/closing/crashing ONE sensor resets ALL the others mid-stream.
 Fix: treat -EBUSY as success, never free the shared line, never drive it low.
-Mirrors the Auvidea TX1 R24.2.1 BSP (release once, never assert).
 
-2) Lower MIPI data rate (imx219_mode_tbls.h)
+2) Shared reset BOOT PULSE — the south-0x12 address-shifter fix (imx219.c)
 
-NVIDIA's stock PLL values produce 912 Mbps/lane MIPI serial rate with zero
-margin over pixel data throughput. On the J106's CSI traces this is marginal for
-the TX2 NVCSI receiver — captures work after boot then wedge with CIL CRC/short
-errors (INTR_STATUS 0x0e0000cd) on a per-boot lottery.
+The bare-J106 bus-2 i2c address shifter only latches "shift" mode (presenting
+the south camera, e.g. CSI-D, at 0x12) when it sees a clean LOW->HIGH edge on
+the shared reset line — exactly what the J106 Technical Reference (page 7)
+prescribes at power-up ("toggle it low briefly, so the cameras are reset
+properly"). The carrier DT releases reset with a gpio-hog that only HOLDS the
+line high, so the shifter often never sees that edge and CSI-D (2-0012) is a
+per-boot enumeration lottery (i2c probe -121). Fix: on the VERY FIRST power_on
+(first sensor's boot-time board_setup, before anything streams), drive the
+shared line LOW ~12 ms then HIGH — one clean edge for every shifter on the
+shared line. Static-flag guarded so streaming power_on never pulses.
 
-Fix: reduce PLL_VT_MPY 0x39→0x2B and PLL_OP_MPY 0x72→0x55 across all modes,
-giving 680 Mbps/lane (−25%). Matches the Auvidea TX1 production BSP exactly.
-Soak-tested: 200/200 frames across 4 cameras, zero errors.
+3) Runtime recovery trigger — j106_reset_recover sysfs (imx219.c)
+
+Userspace cannot pulse the shared reset (the driver owns gpio 461, imx219 is
+built-in), so recovering a missing/wedged south camera otherwise needs a
+reboot. Expose a write-only sysfs on every bound imx219:
+    echo 1 | sudo tee /sys/bus/i2c/devices/<bound-imx219>/j106_reset_recover
+It re-pulses the shared reset (same low->high edge) and re-probes any
+present-but-unbound imx219 (e.g. 2-0012). CAUTION: shared line -> briefly
+resets all 6 cameras; intended as on-demand recovery, not mid-capture.
+
+4) Lower MIPI data rate (imx219_mode_tbls.h)
+
+NVIDIA's stock PLL = 912 Mbps/lane with zero margin; marginal on the J106 CSI
+traces. Reduce PLL_VT_MPY 0x39->0x2B and PLL_OP_MPY 0x72->0x55 across modes 0-4
+= 680 Mbps/lane (-25%), matching the Auvidea TX1 production BSP.
 
 Target: L4T R32.7.6 (kernel 4.9.337).
 Apply from the kernel source root (the dir that contains kernel/nvidia):
     patch -p1 < patches/0001-imx219-share-reset-gpio-j106.patch
 
---- a/kernel/nvidia/drivers/media/i2c/imx219.c
-+++ b/kernel/nvidia/drivers/media/i2c/imx219.c
-@@ -314,12 +314,10 @@
+--- a/kernel/nvidia/drivers/media/i2c/imx219.c	2026-06-16 14:30:55.699036380 +0200
++++ b/kernel/nvidia/drivers/media/i2c/imx219.c	2026-06-16 14:30:55.702358397 +0200
+@@ -24,6 +24,10 @@
+ #include <linux/of.h>
+ #include <linux/of_device.h>
+ #include <linux/of_gpio.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/i2c.h>
++#include <linux/sysfs.h>
+ 
+ #include <media/tegra_v4l2_camera.h>
+ #include <media/tegracam_core.h>
+@@ -297,6 +301,15 @@
+ 	.set_group_hold = imx219_set_group_hold,
+ };
+ 
++/* J106: set once on the VERY FIRST power_on (the first sensor's boot-time
++ * board_setup), so the shared-reset edge pulse below happens exactly once and
++ * never while a sibling camera is streaming. */
++static bool j106_shared_reset_pulsed;
++
++/* J106: the (shared) reset gpio number, captured at power_get so the manual
++ * sysfs recovery trigger (j106_reset_recover) can pulse it at runtime. */
++static int j106_shared_reset_gpio = -1;
++
+ static int imx219_power_on(struct camera_common_data *s_data)
+ {
+ 	int err = 0;
+@@ -314,12 +327,10 @@
  		return err;
  	}
-
+ 
 -	if (pw->reset_gpio) {
 -		if (gpio_cansleep(pw->reset_gpio))
 -			gpio_set_value_cansleep(pw->reset_gpio, 0);
@@ -47,10 +89,38 @@ Apply from the kernel source root (the dir that contains kernel/nvidia):
 +	 * boot by a gpio-hog. Do NOT assert it low here; pulsing reset on a
 +	 * power_on would reset every other (possibly streaming) sensor. Mirrors
 +	 * the Auvidea TX1 R24.2.1 driver ("release once, never assert"). */
-
+ 
  	if (unlikely(!(pw->avdd || pw->iovdd || pw->dvdd)))
  		goto skip_power_seqn;
-@@ -390,12 +388,8 @@
+@@ -347,6 +358,27 @@
+ 	usleep_range(10, 20);
+ 
+ skip_power_seqn:
++	/* J106 south-0x12 address-shifter fix (CSI-D / 2-0012 per-boot lottery).
++	 * The bare-J106 bus-2 i2c address-shifter only latches "shift" mode (which
++	 * presents the south camera at 0x12) when it sees a clean LOW->HIGH edge on
++	 * the shared camera reset line. Our gpio-hog holds reset HIGH from early
++	 * boot, so the shifter often never sees that edge and CSI-D fails its i2c
++	 * probe (-121) on some boots. The working TX1 R24.2.1 BSP has no hog: reset
++	 * sits low at boot and the driver drives it high at the first probe, giving
++	 * exactly this edge. Mirror that: on the VERY FIRST power_on only, drive the
++	 * shared line LOW briefly, then let the deassert below take it HIGH -> one
++	 * clean edge for every shifter on the shared line, before any sensor's i2c
++	 * read. Guarded by a static flag so streaming power_on never pulses (that
++	 * would reset sibling cameras mid-stream). */
++	if (pw->reset_gpio && !j106_shared_reset_pulsed) {
++		j106_shared_reset_pulsed = true;
++		if (gpio_cansleep(pw->reset_gpio))
++			gpio_set_value_cansleep(pw->reset_gpio, 0);
++		else
++			gpio_set_value(pw->reset_gpio, 0);
++		usleep_range(12000, 13000);	/* hold reset low ~12 ms */
++	}
++
+ 	if (pw->reset_gpio) {
+ 		if (gpio_cansleep(pw->reset_gpio))
+ 			gpio_set_value_cansleep(pw->reset_gpio, 1);
+@@ -390,12 +422,8 @@
  			return err;
  		}
  	} else {
@@ -62,96 +132,190 @@ Apply from the kernel source root (the dir that contains kernel/nvidia):
 -		}
 +		/* J106: shared reset - never assert low on power_off, otherwise
 +		 * stopping/closing one sensor would reset all the others. (TX1-style.) */
-
+ 
  		usleep_range(10, 10);
-
-@@ -433,8 +427,9 @@
+ 
+@@ -433,8 +461,9 @@
  	pw->avdd = NULL;
  	pw->iovdd = NULL;
-
+ 
 -	if (likely(pw->reset_gpio))
 -		gpio_free(pw->reset_gpio);
 +	/* J106: reset line is shared by all 6 sensors - never free it here,
 +	 * otherwise unbinding one sensor would release reset for the others
 +	 * (or free a descriptor this instance never owned). */
-
+ 
  	return 0;
  }
-@@ -489,9 +484,14 @@
+@@ -489,9 +518,15 @@
  		goto done;
  	}
-
+ 
 -	/* Reset or ENABLE GPIO */
 +	/* Reset or ENABLE GPIO.
 +	 * Auvidea J106: all 6 IMX219 share ONE physical reset line, so the
 +	 * gpio may already be owned by a sibling sensor or by a gpio-hog
 +	 * (-EBUSY). Treat that as success and just drive the shared line. */
  	pw->reset_gpio = pdata->reset_gpio;
++	j106_shared_reset_gpio = pw->reset_gpio;	/* for runtime recovery */
  	err = gpio_request(pw->reset_gpio, "cam_reset_gpio");
 +	if (err == -EBUSY)
 +		err = 0;
  	if (err < 0) {
  		dev_err(dev, "%s: unable to request reset_gpio (%d)\n",
  			__func__, err);
---- a/kernel/nvidia/drivers/media/i2c/imx219_mode_tbls.h
-+++ b/kernel/nvidia/drivers/media/i2c/imx219_mode_tbls.h
-@@ -107,9 +107,9 @@
+@@ -685,6 +720,61 @@
+ 	.open = imx219_open,
+ };
+ 
++/* J106 reboot-free recovery for the south (0x12) cameras.
++ *
++ * The bare-J106 bus-2 i2c address shifter occasionally fails to present CSI-D
++ * (2-0012) at boot, and the south MIPI links are marginal enough to wedge a
++ * stream. Both are recovered by giving the SHARED reset a clean low->high edge
++ * (re-latches the shifter / re-inits the sensor) and re-probing. Userspace
++ * cannot pulse the line (the driver owns gpio 461, imx219 is built-in), so we
++ * expose a write-only sysfs trigger on every bound imx219:
++ *
++ *     echo 1 | sudo tee /sys/bus/i2c/devices/<any-bound-imx219>/j106_reset_recover
++ *
++ * CAUTION: the reset line is shared by all 6 cameras, so this briefly resets
++ * every sensor - any concurrent stream will glitch. Intended as an on-demand
++ * recovery, not something to run mid-capture on the working cameras. */
++static int j106_reattach_unbound_imx219(struct device *dev, void *data)
++{
++	struct i2c_client *client = i2c_verify_client(dev);
++
++	if (client && !dev->driver && dev->of_node &&
++	    of_device_is_compatible(dev->of_node, "nvidia,imx219")) {
++		int ret = device_attach(dev);	/* re-runs imx219_probe */
++
++		if (ret < 0)
++			dev_dbg(dev, "J106: re-attach failed (%d)\n", ret);
++	}
++	return 0;
++}
++
++static ssize_t j106_reset_recover_store(struct device *dev,
++		struct device_attribute *attr, const char *buf, size_t count)
++{
++	if (!gpio_is_valid(j106_shared_reset_gpio))
++		return -ENODEV;
++
++	dev_info(dev, "J106: shared-reset recovery pulse + re-probe\n");
++
++	/* one clean low->high edge, same shape as the boot pulse */
++	if (gpio_cansleep(j106_shared_reset_gpio))
++		gpio_set_value_cansleep(j106_shared_reset_gpio, 0);
++	else
++		gpio_set_value(j106_shared_reset_gpio, 0);
++	msleep(12);
++	if (gpio_cansleep(j106_shared_reset_gpio))
++		gpio_set_value_cansleep(j106_shared_reset_gpio, 1);
++	else
++		gpio_set_value(j106_shared_reset_gpio, 1);
++	msleep(24);	/* IMX219 t4+t5+t9 settle before any i2c access */
++
++	/* re-probe every imx219 that is present-but-unbound (e.g. 2-0012) */
++	bus_for_each_dev(&i2c_bus_type, NULL, NULL,
++			 j106_reattach_unbound_imx219);
++	return count;
++}
++static DEVICE_ATTR(j106_reset_recover, 0200, NULL, j106_reset_recover_store);
++
+ static int imx219_probe(struct i2c_client *client,
+ 	const struct i2c_device_id *id)
+ {
+@@ -741,6 +831,11 @@
+ 
+ 	dev_dbg(dev, "detected imx219 sensor\n");
+ 
++	/* J106: expose the reboot-free shared-reset recovery trigger on every
++	 * bound camera (write to it to recover a missing/wedged south sensor). */
++	if (sysfs_create_file(&client->dev.kobj, &dev_attr_j106_reset_recover.attr))
++		dev_warn(dev, "J106: could not create j106_reset_recover sysfs\n");
++
+ 	return 0;
+ }
+ 
+@@ -749,6 +844,8 @@
+ 	struct camera_common_data *s_data = to_camera_common_data(&client->dev);
+ 	struct imx219 *priv = (struct imx219 *)s_data->priv;
+ 
++	sysfs_remove_file(&client->dev.kobj, &dev_attr_j106_reset_recover.attr);
++
+ 	tegracam_v4l2subdev_unregister(priv->tc_dev);
+ 	tegracam_device_unregister(priv->tc_dev);
+ 
+--- a/kernel/nvidia/drivers/media/i2c/imx219_mode_tbls.h	2026-06-16 14:30:55.700689842 +0200
++++ b/kernel/nvidia/drivers/media/i2c/imx219_mode_tbls.h	2026-06-16 14:30:55.703567567 +0200
+@@ -107,11 +107,11 @@
  	{0x0304, 0x03},
  	{0x0305, 0x03},
  	{0x0306, 0x00},
 -	{0x0307, 0x39},
-+	{0x0307, 0x2B}, /* PLL_VT_MPY: was 0x39(57), now 43 — lower MIPI rate for J106 */
++	{0x0307, 0x2B}, /* PLL_VT_MPY: 0x39->0x2B  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{0x0309, 0x0A},
  	{0x030B, 0x01},
  	{0x030C, 0x00},
 -	{0x030D, 0x72},
-+	{0x030D, 0x55}, /* PLL_OP_MPY: was 0x72(114), now 85 — 680 Mbps/lane, matches Auvidea TX1 BSP */
++	{0x030D, 0x55}, /* PLL_OP_MPY: 0x72->0x55  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{IMX219_TABLE_END, 0x00}
-@@ -155,9 +155,9 @@
+ };
+ 
+@@ -155,11 +155,11 @@
  	{0x0304, 0x03},
  	{0x0305, 0x03},
  	{0x0306, 0x00},
 -	{0x0307, 0x39},
-+	{0x0307, 0x2B}, /* PLL_VT_MPY: was 0x39(57), now 43 — lower MIPI rate for J106 */
++	{0x0307, 0x2B}, /* PLL_VT_MPY: 0x39->0x2B  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{0x0309, 0x0A},
  	{0x030B, 0x01},
  	{0x030C, 0x00},
 -	{0x030D, 0x72},
-+	{0x030D, 0x55}, /* PLL_OP_MPY: was 0x72(114), now 85 — 680 Mbps/lane, matches Auvidea TX1 BSP */
++	{0x030D, 0x55}, /* PLL_OP_MPY: 0x72->0x55  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{IMX219_TABLE_END, 0x00}
-@@ -197,9 +197,9 @@
+ };
+ 
+@@ -197,11 +197,11 @@
  	{0x0304, 0x03},
  	{0x0305, 0x03},
  	{0x0306, 0x00},
 -	{0x0307, 0x39},
-+	{0x0307, 0x2B}, /* PLL_VT_MPY: was 0x39(57), now 43 — lower MIPI rate for J106 */
++	{0x0307, 0x2B}, /* PLL_VT_MPY: 0x39->0x2B  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{0x0309, 0x0A},
  	{0x030B, 0x01},
  	{0x030C, 0x00},
 -	{0x030D, 0x72},
-+	{0x030D, 0x55}, /* PLL_OP_MPY: was 0x72(114), now 85 — 680 Mbps/lane, matches Auvidea TX1 BSP */
++	{0x030D, 0x55}, /* PLL_OP_MPY: 0x72->0x55  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{IMX219_TABLE_END, 0x00}
-@@ -239,9 +239,9 @@
+ };
+ 
+@@ -239,11 +239,11 @@
  	{0x0304, 0x03},
  	{0x0305, 0x03},
  	{0x0306, 0x00},
 -	{0x0307, 0x39},
-+	{0x0307, 0x2B}, /* PLL_VT_MPY: was 0x39(57), now 43 — lower MIPI rate for J106 */
++	{0x0307, 0x2B}, /* PLL_VT_MPY: 0x39->0x2B  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{0x0309, 0x0A},
  	{0x030B, 0x01},
  	{0x030C, 0x00},
 -	{0x030D, 0x72},
-+	{0x030D, 0x55}, /* PLL_OP_MPY: was 0x72(114), now 85 — 680 Mbps/lane, matches Auvidea TX1 BSP */
++	{0x030D, 0x55}, /* PLL_OP_MPY: 0x72->0x55  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{IMX219_TABLE_END, 0x00}
-@@ -281,9 +281,9 @@
+ };
+ 
+@@ -281,11 +281,11 @@
  	{0x0304, 0x03},
  	{0x0305, 0x03},
  	{0x0306, 0x00},
 -	{0x0307, 0x39},
-+	{0x0307, 0x2B}, /* PLL_VT_MPY: was 0x39(57), now 43 — lower MIPI rate for J106 */
++	{0x0307, 0x2B}, /* PLL_VT_MPY: 0x39->0x2B  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{0x0309, 0x0A},
  	{0x030B, 0x01},
  	{0x030C, 0x00},
 -	{0x030D, 0x72},
-+	{0x030D, 0x55}, /* PLL_OP_MPY: was 0x72(114), now 85 — 680 Mbps/lane, matches Auvidea TX1 BSP */
++	{0x030D, 0x55}, /* PLL_OP_MPY: 0x72->0x55  680 Mbps/lane (J106, matches Auvidea TX1) */
  	{IMX219_TABLE_END, 0x00}
+ };
+ 
