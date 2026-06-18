@@ -677,9 +677,21 @@ sudo systemctl restart nvargus-daemon
 > live-source latency negotiation. Kill it by PID (`kill <gst-launch-pid>`) — a `pkill -f` pattern
 > containing `gst-launch`/`nvcompositor` will also match (and kill) your own ssh shell.
 
-### 6.6 Rollback
-Set `DEFAULT` back to a previous LABEL (e.g. `j106usb` or `primary`) and reboot. The partition DTB and
-stock `Image` are never modified.
+### 6.6 Rollback & boot‑hang recovery
+**Rollback (board boots):** set `DEFAULT` back to a previous LABEL (e.g. `j106-680-rst` or `primary`) and
+reboot. The partition DTB and stock `Image` are never modified.
+
+**Recovery (board hangs — a bad `DEFAULT` DTB):** if a deployed DTB wedges the kernel (no network, silent
+if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux menu over the debug UART**
+(`/dev/ttyUSB0` @115200) — no reflash:
+1. Power‑cycle while capturing the UART. **Do not press a key during "Hit any key to stop autoboot"** (that
+   drops to the U‑Boot shell and skips the menu).
+2. After `L4T boot options` / `Enter choice:` appears, send the **known‑good label number + Enter** (e.g.
+   `6` = `j106-680-rst`). `TIMEOUT 30` = a ~3 s window; a tiny pyserial watcher that types the digit when it
+   sees `L4T boot options` is reliable.
+3. Once booted, make it durable: `sudo sed -i 's/^DEFAULT .*/DEFAULT j106-680-rst/' /boot/extlinux/extlinux.conf`.
+
+(June 2026: `DEFAULT j106-fan` → `tegra186-j106-imu-fan.dtb` hung at `Starting kernel`; recovered this way.)
 
 ---
 
@@ -693,12 +705,22 @@ stock `Image` are never modified.
 ### ✅ Working
 - **USB host ports** (M110) — VBUS fix in `override-usb.dtsi` (stock routes VBUS through devkit
   `pca953x` expanders absent on the carrier → `‑517` defer; fixed regulator forced always‑on).
-- **Fan control** — fixed in `override-usb.dtsi`. Stock gates `vdd-fan` (`regulator@13`) through the
-  *same* absent devkit I²C expander, so the regulator never registers → `FAN: couldn't get the regulator`
-  → `pwm-fan` won't probe → no PWM control → fan stuck **always on at full**. Same fix (drop the expander
-  gpio, force the regulator always‑on): `pwm-fan` now probes, registers as a cooling device under
-  `thermal-fan-est`, and the kernel **ramps the fan with temperature** (verified OFF at ~33 °C, `target_pwm=0`)
-  — as on TX1.
+- **Fan control** — needs **two independent** fixes (both now in place):
+  1. **PWM control** — fixed in `override-usb.dtsi`. Stock gates `vdd-fan` (`regulator@13`) through the
+     *same* absent devkit I²C expander, so the regulator never registers → `FAN: couldn't get the regulator`
+     → `pwm-fan` won't probe → no PWM control → fan stuck **always on at full**. Same fix (drop the expander
+     gpio, force the regulator always‑on): `pwm-fan` probes, registers as a cooling device under
+     `thermal-fan-est`, and the kernel ramps PWM with temperature (`target_pwm` 80/120/160/255 at the
+     **51/61/71/82 °C** trips; `0` when cool).
+  2. **Fan‑enable line** — the J106 fan header (J12) is gated by an **inverting MOSFET** off the module's
+     **AUD_RST** signal (`GPIO_J6` = sysfs **gpio 398**, `GPIO1_AUD_RST`): high = disabled, low = enabled.
+     The rt5659 codec is absent so AUD_RST floats **high** → the fan never physically spins even though PWM
+     is ramping (the "verified `target_pwm=0` at 33 °C" above only proved *PWM* control, not airflow). Fix =
+     hold AUD_RST **low** via the **userspace** [`tools/j106-fan-enable.service`](tools/j106-fan-enable.service)
+     (oneshot, drives gpio 398 low at boot; the governor still owns speed). Verified end‑to‑end with thermal
+     emulation: 55 °C → PWM 80 → ~1950 rpm, 65 °C → PWM 120 → ~2800 rpm; off when cool.
+     ⚠️ **Do NOT use the device‑tree gpio‑hog** (`tx2-j106-6csi/fan-enable.dtsi`): the DTB that bundled it
+     (`tegra186-j106-imu-fan.dtb`, extlinux `LABEL j106-fan`) **hangs the kernel at boot** — recover per §6.6.
 - **HDMI 5V regulator** — fixed in `override-usb.dtsi`. `vdd-hdmi` (`regulator@3`), gated by the same absent
   expander, made nvdisplay defer with `couldn't get regulator vdd_hdmi_5v0, -517`. Dropping the expander gpio
   clears it (the residual `tegra_hdmi_tmds_range_read failed` is just the EDID read with no monitor attached).

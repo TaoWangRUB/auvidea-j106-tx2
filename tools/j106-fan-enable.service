@@ -1,0 +1,33 @@
+# J106 fan enable — hold AUD_RST / GPIO_J6 low so the carrier's fan MOSFET is enabled.
+#
+# The J106 fan (header J12) is gated by an INVERTING MOSFET off the module's AUD_RST
+# signal: AUD_RST high = fan disabled, low = fan enabled. On the J106 the rt5659 codec
+# is absent, so AUD_RST floats high and the fan never spins even though pwm-fan / the
+# thermal governor are ramping PWM correctly. Driving AUD_RST low enables the fan; the
+# kernel thermal governor still owns fan *speed* via PWM.
+#
+#   AUD_RST = GPIO_J6 = TEGRA_MAIN_GPIO(J,6) = sysfs gpio 398 (tegra-gpio base 320),
+#   shown in /sys/kernel/debug/gpio as "GPIO1_AUD_RST".
+#
+# This is done in USERSPACE on purpose. The device-tree gpio-hog equivalent
+# (tx2-j106-6csi/fan-enable.dtsi, bundled into tegra186-j106-imu-fan.dtb) HANGS the
+# kernel at boot — do not deploy it. See README §5/§7 and the boot-hang recovery note.
+#
+# Install:
+#   sudo cp tools/j106-fan-enable.service /etc/systemd/system/
+#   sudo systemctl enable --now j106-fan-enable.service
+
+[Unit]
+Description=J106 fan enable (hold AUD_RST / GPIO_J6 low so the fan MOSFET is enabled)
+DefaultDependencies=no
+After=sysinit.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'G=398; [ -d /sys/class/gpio/gpio$G ] || echo $G > /sys/class/gpio/export; echo out > /sys/class/gpio/gpio$G/direction; echo 0 > /sys/class/gpio/gpio$G/value'
+ExecStop=/bin/sh -c 'echo 1 > /sys/class/gpio/gpio398/value 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
