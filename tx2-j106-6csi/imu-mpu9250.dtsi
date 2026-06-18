@@ -29,6 +29,21 @@
  * survive the SoC change. Earlier revisions wrongly used spi@3210000 (HW SPI1,
  * gpio_wan, -> 0xFF) and spi@3240000 (HW SPI4, gpio_cam, -> 0x00); both wrong.
  *
+ * ⚠️ HARDWARE CONFLICT — IMU vs FAN TACH (and USB OTG VBUS-detect).
+ * On the J106+TX2 the fan tach (FAN_TACH, module pin B17 -> tachometer@39c0000)
+ * is routed to one of these uart5 data/clock pads, so enabling the IMU drops the
+ * fan **RPM readback** (`.../generic_pwm_tachometer/.../rpm` -> 0). Bisected: with
+ * any of uart5_rx/tx/rts muxed to spi3 the tach reads 0; it does NOT come back by
+ * freeing uart5_cts, so FAN_TACH is a data pad the IMU needs -> the two CANNOT
+ * coexist. **Fan COOLING is unaffected**: FAN_PWM (module C16) is on the AON
+ * pwm@c340000 and the fan-enable is AUD_RST (userspace service) — the fan still
+ * spins and ramps with temperature (verified spinning), you just lose the RPM
+ * number. Separately, uart5_cts_px7 = gpio 479 = the USB OTG VBUS-detect extcon,
+ * so the IMU also disables that (host ports are unaffected — they use the
+ * always-on regulator, and OTG device-mode never worked on the M110 J17 anyway).
+ * Net: booting LABEL j106-imu = IMU + cooling fan but no fan RPM telemetry;
+ * LABEL j106-680-rst = full fan/USB telemetry but no IMU.
+ *
  * Two things are required and BOTH live here:
  *   1. mux the four uart5_* pads to "spi3";
  *   2. free CS0 (disable the touchscreen) and add a tegra-spidev there.

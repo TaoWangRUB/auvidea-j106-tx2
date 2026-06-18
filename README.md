@@ -733,6 +733,14 @@ if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux m
   CS0 (`spi-touch-sharp19x12@0`), and adds a `tegra-spidev`. Read it after `modprobe spidev` (the `=m`
   module); `/dev/spidev1.0` is root‑only. (Wrong buses, all 0xFF/0x00: `spi@3210000`/gpio_wan,
   `spi@3230000`/gpio_sen, `spi@3240000`/gpio_cam.)
+  ⚠️ **IMU vs fan‑tach conflict (J106 pin sharing):** `FAN_TACH` (module pin B17 → `tachometer@39c0000`)
+  is routed to one of the `uart5_rx/tx/rts` data pads the IMU's spi3 needs, so **enabling the IMU drops the
+  fan RPM readback** (`…/generic_pwm_tachometer/…/rpm` → 0). Bisected: the tach doesn't return by freeing
+  `uart5_cts`, so it's a data pad — **IMU and fan‑tach cannot coexist**. **Cooling is unaffected** — `FAN_PWM`
+  (module C16) is the AON `pwm@c340000` and the fan still spins/ramps with temperature (verified spinning);
+  only the RPM telemetry is lost. (`uart5_cts`=gpio 479 is also the USB‑OTG VBUS‑detect extcon — likewise
+  disabled, but host ports use the always‑on regulator and OTG never worked on J17.) So: `LABEL j106-imu` =
+  IMU + cooling fan, no RPM number; `LABEL j106-680-rst` = full fan/USB telemetry, no IMU.
 
 > **Benign boot messages** (all expected on this carrier — absent devkit chips, not faults):
 > `pca953x 0-0074/0-0077 -121` (the routed‑around I²C GPIO expanders), `ina3221x 0-0042/0-0043 -121`
