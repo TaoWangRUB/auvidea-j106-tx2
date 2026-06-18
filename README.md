@@ -724,6 +724,15 @@ if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux m
 - **HDMI 5V regulator** — fixed in `override-usb.dtsi`. `vdd-hdmi` (`regulator@3`), gated by the same absent
   expander, made nvdisplay defer with `couldn't get regulator vdd_hdmi_5v0, -517`. Dropping the expander gpio
   clears it (the residual `tegra_hdmi_tmds_range_read failed` is just the EDID read with no monitor attached).
+- **Onboard IMU (MPU‑9250) — WORKING** (`tx2-j106-6csi/imu-mpu9250.dtsi`, built into `tegra186-j106-imu.dtb`,
+  extlinux `LABEL j106-imu`). The 9‑axis IMU is optional but **fitted on this board** (verified: `WHO_AM_I`
+  reg `0x75` = `0x71`, live accel Z ≈ +1 g gravity). The bus mapping is the trap — it does **not** transfer
+  from TX1: on **TX1** the IMU is HW SPI4 = `/dev/spidev3.0`; on **TX2** the same connector pins land on HW
+  **SPI3 = `spi@c260000` = `/dev/spidev1.0`** (CS0), pinmux **`spi3` on the `uart5_rx/tx/rts/cts` pads**
+  (uart5 is free; console is ttyS0). The dtsi muxes those 4 pads, disables the absent devkit touchscreen on
+  CS0 (`spi-touch-sharp19x12@0`), and adds a `tegra-spidev`. Read it after `modprobe spidev` (the `=m`
+  module); `/dev/spidev1.0` is root‑only. (Wrong buses, all 0xFF/0x00: `spi@3210000`/gpio_wan,
+  `spi@3230000`/gpio_sen, `spi@3240000`/gpio_cam.)
 
 > **Benign boot messages** (all expected on this carrier — absent devkit chips, not faults):
 > `pca953x 0-0074/0-0077 -121` (the routed‑around I²C GPIO expanders), `ina3221x 0-0042/0-0043 -121`

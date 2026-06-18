@@ -1,0 +1,105 @@
+/* J106 onboard IMU — InvenSense MPU-9250 (9-axis) on Tegra186 SPI3.
+ *
+ * The J106 wires the module's IMU-SPI connector signals to an MPU-9250
+ * (J106 technical reference v1.0, "IMU (MPU-9250)"). Auvidea label this
+ * connector "SPI0"; on Tegra186 it lands on the **SPI3** controller
+ * spi@c260000 (alias spi1 -> /dev/spidev1.0, CS0). VERIFIED on this board:
+ * WHO_AM_I (reg 0x75) reads 0x71 here, in SPI mode 0 and 3.
+ *
+ * Pinmux: the "spi3" SFIO function routes ONLY to the uart5_* pads (confirmed
+ * live: `pinmux-functions` -> "function: spi3, groups = [ uart5_rx_px5
+ * uart5_tx_px4 uart5_rts_px6 uart5_cts_px7 ]"). These pads are MUX-UNCLAIMED
+ * on the stock tree and uart5 is NOT the console (console = ttyS0/uarta), so
+ * they are free for the IMU:
+ *
+ *   Auvidea SPI0_CLK/MISO/MOSI/CS0 = Tegra186 SPI3 on uart5_rx/tx/rts/cts_px
+ *   INT (J106 pin 12)              = GPIO9_MOTION_INT (AON gpio) — see note
+ *
+ * On the NVIDIA p2597 devkit, spi@c260000/CS0 carries a Sharp lr388k7 touch
+ * controller (node spi-touch-sharp19x12@0) — absent on the J106, so we disable
+ * it and put a tegra-spidev on CS0 in its place -> /dev/spidev1.0.
+ *
+ * VddIO is 1.8 V. The IMU is OPTIONAL (only some boards are populated) — this
+ * board IS populated (also cross-checked on the TX1 reference, where the same
+ * chip reads 0x71 on its native /dev/spidev3.0).
+ *
+ * HISTORY: the bus is NOT what the TX1->TX2 naming suggests. On TX1 the IMU is
+ * HW SPI4 (/dev/spidev3.0); on TX2 the SAME connector pins land on HW SPI3
+ * (spi@c260000, /dev/spidev1.0) — the controller<->connector mapping does not
+ * survive the SoC change. Earlier revisions wrongly used spi@3210000 (HW SPI1,
+ * gpio_wan, -> 0xFF) and spi@3240000 (HW SPI4, gpio_cam, -> 0x00); both wrong.
+ *
+ * Two things are required and BOTH live here:
+ *   1. mux the four uart5_* pads to "spi3";
+ *   2. free CS0 (disable the touchscreen) and add a tegra-spidev there.
+ *
+ * Raw-integer pinconf values (no TEGRA_PIN_* macros) — same convention as
+ * tegra186-camera-j106-imx219.dtsi (concatenated onto a decompiled DTS).
+ *
+ * INT note: for spidev (polled) use the INT line is not needed. If you later
+ * switch to interrupt-driven reads, the MPU's INT is open-drain by power-on
+ * default and the J106 has no pull-up on it, so program the MPU INT_PIN_CFG
+ * register for push-pull ("totem pole") output in software.
+ */
+
+/ {
+	spi@c260000 {	/* Tegra186 SPI3, alias spi1 */
+		status = "okay";
+
+		spi-touch-sharp19x12@0 {
+			status = "disabled";	/* devkit touchscreen on CS0 — absent on J106 */
+		};
+
+		spi@0 {				/* chip-select 0 -> /dev/spidev1.0 */
+			compatible = "tegra-spidev";
+			reg = <0x00>;
+			spi-max-frequency = <0x989680>;	/* 10 MHz cap; userspace lowers per-xfer for register reads */
+
+			controller-data {
+				nvidia,enable-hw-based-cs;
+				nvidia,rx-clk-tap-delay = <0x08>;
+				nvidia,tx-clk-tap-delay = <0x16>;
+			};
+		};
+	};
+
+	pinmux@2430000 {
+		common {
+			j106_imu_spi3_sck {
+				nvidia,pins = "uart5_rx_px5";	/* SPI3 SCK */
+				nvidia,function = "spi3";
+				nvidia,pull = <1>;		/* PULL_DOWN */
+				nvidia,tristate = <0>;		/* DISABLE  */
+				nvidia,enable-input = <1>;	/* ENABLE   */
+				nvidia,lpdr = <0>;		/* DISABLE  */
+			};
+
+			j106_imu_spi3_din {
+				nvidia,pins = "uart5_tx_px4";	/* SPI3 MISO (IMU AD0/SDO) */
+				nvidia,function = "spi3";
+				nvidia,pull = <1>;
+				nvidia,tristate = <0>;
+				nvidia,enable-input = <1>;
+				nvidia,lpdr = <0>;
+			};
+
+			j106_imu_spi3_dout {
+				nvidia,pins = "uart5_rts_px6";	/* SPI3 MOSI (IMU SDA/SDI) */
+				nvidia,function = "spi3";
+				nvidia,pull = <1>;
+				nvidia,tristate = <0>;
+				nvidia,enable-input = <1>;
+				nvidia,lpdr = <0>;
+			};
+
+			j106_imu_spi3_cs0 {
+				nvidia,pins = "uart5_cts_px7";	/* SPI3 CS0 (IMU /CS) */
+				nvidia,function = "spi3";
+				nvidia,pull = <1>;
+				nvidia,tristate = <0>;
+				nvidia,enable-input = <1>;
+				nvidia,lpdr = <0>;
+			};
+		};
+	};
+};
