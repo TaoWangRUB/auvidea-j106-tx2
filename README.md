@@ -730,8 +730,10 @@ if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux m
   from TX1: on **TX1** the IMU is HW SPI4 = `/dev/spidev3.0`; on **TX2** the same connector pins land on HW
   **SPI3 = `spi@c260000` = `/dev/spidev1.0`** (CS0), pinmux **`spi3` on `uart5_rx/rts/cts`** (3 pads;
   console is ttyS0, unaffected). The dtsi muxes those 3 pads, disables the absent devkit touchscreen on
-  CS0 (`spi-touch-sharp19x12@0`), and adds a `tegra-spidev`. Read it after `modprobe spidev` (the `=m`
-  module); `/dev/spidev1.0` is root‑only. (Wrong buses, all 0xFF/0x00: `spi@3210000`/gpio_wan,
+  CS0 (`spi-touch-sharp19x12@0`), and adds a `tegra-spidev`. `spidev` is the `=m` module — for it to load
+  at boot (so `/dev/spidev1.0` exists without `modprobe spidev`), the **only extra deploy step**:
+  `echo spidev | sudo tee /etc/modules-load.d/spidev.conf`. No kernel patch/defconfig change is needed.
+  `/dev/spidev1.0` is root‑only. (Wrong buses, all 0xFF/0x00: `spi@3210000`/gpio_wan,
   `spi@3230000`/gpio_sen, `spi@3240000`/gpio_cam.)
   **IMU + fan‑tach coexist — the key pin trick:** `uart5_tx_px4` is SPI3 **CS1** (a second chip‑select the
   IMU doesn't use — it's on CS0) **and** the same SoC ball as **`FAN_TACH`** (J12 pin 3 / module B17 →
