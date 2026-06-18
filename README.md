@@ -728,19 +728,19 @@ if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux m
   extlinux `LABEL j106-imu`). The 9‑axis IMU is optional but **fitted on this board** (verified: `WHO_AM_I`
   reg `0x75` = `0x71`, live accel Z ≈ +1 g gravity). The bus mapping is the trap — it does **not** transfer
   from TX1: on **TX1** the IMU is HW SPI4 = `/dev/spidev3.0`; on **TX2** the same connector pins land on HW
-  **SPI3 = `spi@c260000` = `/dev/spidev1.0`** (CS0), pinmux **`spi3` on the `uart5_rx/tx/rts/cts` pads**
-  (uart5 is free; console is ttyS0). The dtsi muxes those 4 pads, disables the absent devkit touchscreen on
+  **SPI3 = `spi@c260000` = `/dev/spidev1.0`** (CS0), pinmux **`spi3` on `uart5_rx/rts/cts`** (3 pads;
+  console is ttyS0, unaffected). The dtsi muxes those 3 pads, disables the absent devkit touchscreen on
   CS0 (`spi-touch-sharp19x12@0`), and adds a `tegra-spidev`. Read it after `modprobe spidev` (the `=m`
   module); `/dev/spidev1.0` is root‑only. (Wrong buses, all 0xFF/0x00: `spi@3210000`/gpio_wan,
   `spi@3230000`/gpio_sen, `spi@3240000`/gpio_cam.)
-  ⚠️ **IMU vs fan‑tach conflict (J106 pin sharing):** `FAN_TACH` (module pin B17 → `tachometer@39c0000`)
-  is routed to one of the `uart5_rx/tx/rts` data pads the IMU's spi3 needs, so **enabling the IMU drops the
-  fan RPM readback** (`…/generic_pwm_tachometer/…/rpm` → 0). Bisected: the tach doesn't return by freeing
-  `uart5_cts`, so it's a data pad — **IMU and fan‑tach cannot coexist**. **Cooling is unaffected** — `FAN_PWM`
-  (module C16) is the AON `pwm@c340000` and the fan still spins/ramps with temperature (verified spinning);
-  only the RPM telemetry is lost. (`uart5_cts`=gpio 479 is also the USB‑OTG VBUS‑detect extcon — likewise
-  disabled, but host ports use the always‑on regulator and OTG never worked on J17.) So: `LABEL j106-imu` =
-  IMU + cooling fan, no RPM number; `LABEL j106-680-rst` = full fan/USB telemetry, no IMU.
+  **IMU + fan‑tach coexist — the key pin trick:** `uart5_tx_px4` is SPI3 **CS1** (a second chip‑select the
+  IMU doesn't use — it's on CS0) **and** the same SoC ball as **`FAN_TACH`** (J12 pin 3 / module B17 →
+  `tachometer@39c0000`). Muxing it to spi3 silently zeroes the fan RPM readback. So the dtsi **deliberately
+  omits `uart5_tx`** — and then **both work simultaneously** (verified: WHO_AM_I `0x71` + live accel **and**
+  fan tach ~2300 rpm under load). (Fan *speed* control is independent regardless: `FAN_PWM` = module C16 =
+  AON `pwm@c340000`; fan‑enable = AUD_RST service. Note `uart5_cts`=gpio 479 is also the USB‑OTG VBUS‑detect
+  extcon, taken for SPI3 — host ports unaffected, OTG device‑mode never worked on J17 anyway.) So `LABEL
+  j106-imu` now gives **IMU + fan RPM + cameras + USB** all together.
 
 > **Benign boot messages** (all expected on this carrier — absent devkit chips, not faults):
 > `pca953x 0-0074/0-0077 -121` (the routed‑around I²C GPIO expanders), `ina3221x 0-0042/0-0043 -121`

@@ -3,17 +3,22 @@
  * The J106 wires the module's IMU-SPI connector signals to an MPU-9250
  * (J106 technical reference v1.0, "IMU (MPU-9250)"). Auvidea label this
  * connector "SPI0"; on Tegra186 it lands on the **SPI3** controller
- * spi@c260000 (alias spi1 -> /dev/spidev1.0, CS0). VERIFIED on this board:
- * WHO_AM_I (reg 0x75) reads 0x71 here, in SPI mode 0 and 3.
+ * spi@c260000 (= alias spi1 -> /dev/spidev1.0, CS0). VERIFIED on this board:
+ * WHO_AM_I (reg 0x75) = 0x71, SPI modes 0 & 3, live accel Z ~ +1g (gravity).
  *
- * Pinmux: the "spi3" SFIO function routes ONLY to the uart5_* pads (confirmed
- * live: `pinmux-functions` -> "function: spi3, groups = [ uart5_rx_px5
- * uart5_tx_px4 uart5_rts_px6 uart5_cts_px7 ]"). These pads are MUX-UNCLAIMED
- * on the stock tree and uart5 is NOT the console (console = ttyS0/uarta), so
- * they are free for the IMU:
+ * Pinmux: the "spi3" SFIO function routes only to the uart5_* pads. The IMU
+ * uses **three** of them — uart5_rx_px5, uart5_rts_px6, uart5_cts_px7 (the
+ * SPI3 SCK/MOSI/MISO/CS0 set the IMU needs).
  *
- *   Auvidea SPI0_CLK/MISO/MOSI/CS0 = Tegra186 SPI3 on uart5_rx/tx/rts/cts_px
- *   INT (J106 pin 12)              = GPIO9_MOTION_INT (AON gpio) — see note
+ * ⚠️ uart5_tx_px4 is DELIBERATELY NOT muxed. It is SPI3 **CS1** (a second
+ * chip-select the IMU does not use — the IMU is on CS0), and on the J106 it is
+ * the SAME SoC ball as **FAN_TACH** (fan header J12 pin 3, module pin B17 ->
+ * tachometer@39c0000). Muxing it to spi3 silently kills the fan RPM readback
+ * (`.../generic_pwm_tachometer/.../rpm` -> 0) while the fan still spins.
+ * Leaving it unmuxed, BOTH work: verified simultaneously — IMU WHO_AM_I 0x71 +
+ * live accel AND fan tach ~2300 rpm under emulated load. (Fan SPEED control is
+ * unrelated either way: FAN_PWM = module C16 = the AON pwm@c340000; fan-enable
+ * = AUD_RST userspace service.)
  *
  * On the NVIDIA p2597 devkit, spi@c260000/CS0 carries a Sharp lr388k7 touch
  * controller (node spi-touch-sharp19x12@0) — absent on the J106, so we disable
@@ -27,25 +32,16 @@
  * HW SPI4 (/dev/spidev3.0); on TX2 the SAME connector pins land on HW SPI3
  * (spi@c260000, /dev/spidev1.0) — the controller<->connector mapping does not
  * survive the SoC change. Earlier revisions wrongly used spi@3210000 (HW SPI1,
- * gpio_wan, -> 0xFF) and spi@3240000 (HW SPI4, gpio_cam, -> 0x00); both wrong.
+ * gpio_wan, -> 0xFF) and spi@3240000 (HW SPI4, gpio_cam, -> 0x00), and an
+ * earlier spi3 revision muxed all four uart5 pads, which broke the fan tach
+ * (uart5_tx_px4 / CS1) until it was dropped (this file).
  *
- * ⚠️ HARDWARE CONFLICT — IMU vs FAN TACH (and USB OTG VBUS-detect).
- * On the J106+TX2 the fan tach (FAN_TACH, module pin B17 -> tachometer@39c0000)
- * is routed to one of these uart5 data/clock pads, so enabling the IMU drops the
- * fan **RPM readback** (`.../generic_pwm_tachometer/.../rpm` -> 0). Bisected: with
- * any of uart5_rx/tx/rts muxed to spi3 the tach reads 0; it does NOT come back by
- * freeing uart5_cts, so FAN_TACH is a data pad the IMU needs -> the two CANNOT
- * coexist. **Fan COOLING is unaffected**: FAN_PWM (module C16) is on the AON
- * pwm@c340000 and the fan-enable is AUD_RST (userspace service) — the fan still
- * spins and ramps with temperature (verified spinning), you just lose the RPM
- * number. Separately, uart5_cts_px7 = gpio 479 = the USB OTG VBUS-detect extcon,
- * so the IMU also disables that (host ports are unaffected — they use the
- * always-on regulator, and OTG device-mode never worked on the M110 J17 anyway).
- * Net: booting LABEL j106-imu = IMU + cooling fan but no fan RPM telemetry;
- * LABEL j106-680-rst = full fan/USB telemetry but no IMU.
+ * Note: uart5_cts_px7 is also the USB-OTG VBUS-detect extcon (gpio 479); the
+ * IMU takes it for SPI3 (host ports are unaffected — always-on regulator — and
+ * OTG device-mode never worked on the M110 J17 anyway).
  *
- * Two things are required and BOTH live here:
- *   1. mux the four uart5_* pads to "spi3";
+ * Required and both live here:
+ *   1. mux uart5_rx/rts/cts to "spi3" (NOT uart5_tx — see above);
  *   2. free CS0 (disable the touchscreen) and add a tegra-spidev there.
  *
  * Raw-integer pinconf values (no TEGRA_PIN_* macros) — same convention as
@@ -80,8 +76,10 @@
 
 	pinmux@2430000 {
 		common {
-			j106_imu_spi3_sck {
-				nvidia,pins = "uart5_rx_px5";	/* SPI3 SCK */
+			/* IMU SPI3 on uart5_rx/rts/cts. uart5_tx_px4 (SPI3 CS1) is
+			 * intentionally omitted — it is the FAN_TACH ball; see header. */
+			j106_imu_spi3_a {
+				nvidia,pins = "uart5_rx_px5";
 				nvidia,function = "spi3";
 				nvidia,pull = <1>;		/* PULL_DOWN */
 				nvidia,tristate = <0>;		/* DISABLE  */
@@ -89,8 +87,8 @@
 				nvidia,lpdr = <0>;		/* DISABLE  */
 			};
 
-			j106_imu_spi3_din {
-				nvidia,pins = "uart5_tx_px4";	/* SPI3 MISO (IMU AD0/SDO) */
+			j106_imu_spi3_b {
+				nvidia,pins = "uart5_rts_px6";
 				nvidia,function = "spi3";
 				nvidia,pull = <1>;
 				nvidia,tristate = <0>;
@@ -98,17 +96,8 @@
 				nvidia,lpdr = <0>;
 			};
 
-			j106_imu_spi3_dout {
-				nvidia,pins = "uart5_rts_px6";	/* SPI3 MOSI (IMU SDA/SDI) */
-				nvidia,function = "spi3";
-				nvidia,pull = <1>;
-				nvidia,tristate = <0>;
-				nvidia,enable-input = <1>;
-				nvidia,lpdr = <0>;
-			};
-
-			j106_imu_spi3_cs0 {
-				nvidia,pins = "uart5_cts_px7";	/* SPI3 CS0 (IMU /CS) */
+			j106_imu_spi3_c {
+				nvidia,pins = "uart5_cts_px7";
 				nvidia,function = "spi3";
 				nvidia,pull = <1>;
 				nvidia,tristate = <0>;
