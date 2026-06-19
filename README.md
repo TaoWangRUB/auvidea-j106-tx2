@@ -90,8 +90,11 @@ Available TX2 i2c controllers: `gen1_i2c@3160000`, `gen2_i2c@c240000`,
 `gen7_i2c@31c0000`, `gen8_i2c@c250000`, `gen9_i2c@31e0000`.
 
 ### IMX219 modes supported by the R32 driver
-`3264x2464@21`, `3264x1848@28`, `1920x1080@30`, `1280x720@60`, `1280x720@120`
-(native Bayer RGGB, 2 lanes).
+Driver register tables (`imx219_mode_tbls.h`, in driver‑table order):
+`3264x2464@21`, `3264x1848@28`, `1920x1080@30`, **`1640x1232@30`** (2×2‑binned,
+full FoV), `1280x720@60` — the stock `1280x720@120` table is commented out.
+Native Bayer RGGB, 2 lanes. At the J106‑lowered 680 Mbps PLL the real caps are
+**15 / 20 / 30 / 22 / 44 fps**; the DT mode nodes advertise those derated rates.
 
 ---
 
@@ -280,23 +283,47 @@ Probed the running board (`nvidia-desktop`, `192.168.0.168`) directly:
 - Live `i2cdetect -l` adapter numbering matches the table above exactly
   (`c240000`→i2c-1, `3180000`→i2c-2, `c250000`→i2c-7).
 - **Reset GPIO CONFIRMED**: `TEGRA_MAIN_GPIO(R, 5)` = sysfs **gpio 461** (chip base 320 + 141).
-  Exporting it, driving **0 then 1** (active‑low release), made the sensors appear. Pulse:
+
+  #### 🔧 How to reset the cameras (reboot‑free recovery)
+
+  **On the deployed carrier DTB + patched kernel — use the driver's `j106_reset_recover` sysfs.**
+  This is the *only* correct runtime reset. It pulses the one shared reset line (low→high) **and**
+  re‑probes any present‑but‑unbound sensor (e.g. a port‑D `2-0012` that lost the boot lottery).
+
   ```bash
-  G=461
-  sudo sh -c "echo $G > /sys/class/gpio/export"
-  sudo sh -c "echo out > /sys/class/gpio/gpio$G/direction"
-  sudo sh -c "echo 0 > /sys/class/gpio/gpio$G/value"; sleep 0.3
-  sudo sh -c "echo 1 > /sys/class/gpio/gpio$G/value"
+  # 1. List the cameras that DID bind (each has a recover trigger):
+  ls /sys/bus/i2c/drivers/imx219/        # e.g. 2-0010  2-0012  7-0010  7-0012
+
+  # 2. Trigger recovery from ANY bound camera. The line is shared, so one write
+  #    resets + re-probes ALL 6 sensors:
+  echo 1 | sudo tee /sys/bus/i2c/devices/2-0010/j106_reset_recover
+
+  # 3. Confirm (the previously-missing sensor should now be bound + have a /dev/video*):
+  ls /sys/bus/i2c/drivers/imx219/ ; ls /dev/video*
   ```
-  (This is the manual equivalent of the gpio‑hog in the dtsi; it does **not** survive reboot.)
-  > ⚠️ **This sysfs export only works on the STOCK DTB.** On the deployed **carrier** DTB gpio 461 is
-  > claimed by the camera stack (the `j106-camera-reset-release` hog / the imx219 driver's
-  > `cam_reset_gpio`), so `echo 461 > /sys/class/gpio/export` fails with **`‑EBUSY`** (verified: exit 1,
-  > no `gpio461` node) — and `gpioset`/libgpiod likewise can't request a held line. Once the camera
-  > stack owns the pin, **only the driver can drive it**: that is why the reset edge lives in patch
-  > `0001` as the **boot pulse** (Stage 1.5) and the **`j106_reset_recover` sysfs** (Stage 1.6), not as
-  > a userspace gpio toggle. The sysfs toggle would also only make the *edge* — it wouldn't re‑probe the
-  > sensor (`echo 2-0012 > /sys/bus/i2c/drivers/imx219/bind`), which the driver recovery does for you.
+
+  > **Pick the right `<bound-imx219>`.** A sensor that *failed* its own boot probe has **no**
+  > `j106_reset_recover` file — trigger from a **sibling that did bind** (recover port D `2-0012`
+  > via port C `2-0010`). Buses: `2-00xx` = CSI‑C/D (`i2c@3180000`), `7-00xx` = CSI‑E/F
+  > (`i2c@c250000`); `xx10` = north, `xx12` = south (shifted). ⚠️ Shared line → this briefly
+  > resets **all 6** cameras, so it's on‑demand recovery, **not** something to run mid‑capture.
+
+  > ⚠️ **The old `gpio 461` sysfs‑export method is OBSOLETE — do not use it on the carrier DTB.**
+  > It only worked during early bring‑up on the **stock** DTB (when nothing owned the pin):
+  > ```bash
+  > # STOCK DTB ONLY (historical) — fails on the carrier DTB:
+  > G=461; sudo sh -c "echo $G > /sys/class/gpio/export"
+  > sudo sh -c "echo out > /sys/class/gpio/gpio$G/direction"
+  > sudo sh -c "echo 0 > /sys/class/gpio/gpio$G/value"; sleep 0.3
+  > sudo sh -c "echo 1 > /sys/class/gpio/gpio$G/value"
+  > ```
+  > On the deployed carrier DTB gpio 461 is claimed by the imx219 driver as `cam_reset_gpio`
+  > (and the `j106-camera-reset-release` hog), so `echo 461 > /sys/class/gpio/export` fails with
+  > **`‑EBUSY`** (verified live: exit 1, no `gpio461` node); `gpioset`/libgpiod can't grab a held
+  > line either. Only the driver can drive the pin — hence the reset edge lives in patch `0001` as
+  > the **boot pulse** (Stage 1.5) and the **`j106_reset_recover` sysfs** (Stage 1.6). The raw
+  > toggle would also only make the *edge*; it would **not** re‑probe the sensor, which
+  > `j106_reset_recover` does for you.
 - **Cameras detected after reset release** (initially 4 connected):
   ```
   i2c-2 (3180000):  0x10  0x12     <-- CSI-C/D pair
@@ -450,6 +477,24 @@ for b in $(seq 0 8); do echo "== bus $b =="; i2cdetect -y -r $b; done
 Properly toggling the shared reset (the gpio-hog above) and a full power cycle generally fixes
 it; it is a documented carrier quirk, not a device-tree error.
 
+**Shifter mis-latch → a camera at the WRONG i2c address (recoverable ONLY by cold power-cycle).**
+Observed live (June 2026): after closing a running capture, **port A vanished** — bus-1 `0x10`/`0x12`
+both NAK'd (`imx219 1-0010: -121`), bus 1 showed only the shifter at `0x0c`. But the **sensor was
+alive** — it had been **address-shifted to `0x3b`**. The shift is a **hardware solder-strap (default
+2), not i2c-programmable** (J106 ref p.440), so the shifter chip had simply latched a bad state. Prove
+the sensor is alive by reading the IMX219 model-ID register (`0x0000` → `0x02 0x19`) at the stray
+address:
+```bash
+sudo i2cdetect -y -r 1                                   # find any extra ACKing address (e.g. 0x3b)
+sudo i2ctransfer -y 1 w2@0x3b 0x00 0x00 r2              # 0x02 0x19 == a live IMX219 at the wrong addr
+```
+**Neither a reset pulse (`j106_reset_recover`) nor a soft `reboot` clears it** — the reset GPIO resets
+the *sensors*, not the shifter chip, and `reboot` leaves the carrier rails up so the shifter keeps its
+latch. **Only a true cold power-cycle** (pull the DC barrel jack ~10 s) re-latches the shifter from its
+straps and restores the camera to `0x10`. Verified: cold boot → `imx219 1-0010 bound` → 5 cams (`/dev/video0-4`).
+(This is distinct from the driver-fixed *port-D boot lottery* in §5 Stage 1.5/1.6, which IS a reset-edge
+problem and IS fixed by the boot pulse / `j106_reset_recover`.)
+
 ---
 
 ## 5. Camera bring‑up: issues & fixes by pipeline stage (TX2 on J106 vs stock L4T R32.7.6)
@@ -522,17 +567,21 @@ This was the **real "no frames" blocker.** Symptom: `NVCSI INTR_STATUS 0x8 = PP_
 
 | # | Issue | Fix |
 |---|---|---|
-| 5.1 | **DT mode index ≠ driver register‑table index.** DT defined only 2 modes; the driver table has 5. Argus passes the DT mode index straight to the driver → wrong resolution programmed → `ChanselFault PIXEL_LONG_LINE` → ISP never outputs → `nvbuf_utils: dmabuf_fd ‑1`. | Define **all 5 modes in driver‑table order** (`mode0…mode4`). |
-| 5.2 | DT framerates exceeded the lowered (680 Mbps) PLL → `frame_length` too short → `ChanselShortFrame / PIXEL_INCOMPLETE`. | **Derate framerates** to the 680 Mbps clock: 15 / 20 / 30 / 44 / 110 fps for modes 0–4. |
+| 5.1 | **DT mode index ≠ driver register‑table index.** DT defined only 2 modes; the driver table has 5. Argus passes the DT mode index straight to the driver → wrong resolution programmed → `ChanselFault PIXEL_LONG_LINE` → ISP never outputs → `nvbuf_utils: dmabuf_fd ‑1`. | Define **all 5 modes in driver‑table order** (`mode0…mode4`): `3264x2464 / 3264x1848 / 1920x1080 / 1640x1232 / 1280x720`. (An earlier 5‑mode fill listed 1280x720 at index 3 instead of the driver's **1640x1232** and a phantom 720p@110 at index 4 — corrected so the DT mode list matches `imx219_frmfmt` exactly; index 3 now exposes the full‑FoV mode.) |
+| 5.2 | DT framerates exceeded the lowered (680 Mbps) PLL → `frame_length` too short → `ChanselShortFrame / PIXEL_INCOMPLETE`. | **Derate framerates** to the 680 Mbps clock: **15 / 20 / 30 / 22 / 44 fps** for modes 0–4. The driver `frmfmt` rates were realigned to match (`imx219_22fps` / `imx219_44fps`) so Argus/V4L2 never request a rate the sensor timing can't deliver. |
 | 5.3 | Stock `tegra-camera-platform` modules are `status="disabled"`; the overlay merge inherits that → Argus "**No cameras available**". | `status="okay"` on every module + `drivernode0`; add `drivernode1` (`v4l2_lens`) → a lens node. |
 | 5.4 | **Argus aliasing:** all 6 modules had `position = "rear"`. libargus keys each camera by `(GUID, position)`; 6× identical **EEPROM‑less** IMX219 all hash to `(GUID 0, position 0)` → every `sensor-id` resolves to the **last** module → *all show one camera*. | Give each module a **unique `position`** (`topleft/topright/centerleft/centerright/bottomleft/bottomright`) + matching badge. Proven in the PCL log: `Found GUID 0 match at index[0..5]` (before) → distinct GUID 0–5, 1:1 (after). NVIDIA docs require unique position for identical modules; stock TX1 `e3322` (same A815P2 IMX219) DTB does exactly this. |
 
 ### Stage 6 — `/dev/videoN` & capture usage (not bugs — gotchas)
 
 - **V4L2 mode‑select quirk:** raw capture defaults to **mode0 full‑res 3264×2464@~15 fps** unless you set
-  `v4l2-ctl --set-ctrl sensor_mode=N` (2 = 1080p, 3 = 720p…). Raw V4L2 scales to all cameras concurrently.
-- **Argus caps gotcha:** pin a **valid** mode/rate or you get `not-negotiated (-4)`: `1280×720` has only
-  44/60 fps modes (680‑rate: 44/110), `1920×1080` only 30 fps. There is no 720p@30.
+  `v4l2-ctl --set-ctrl sensor_mode=N` (2 = 1080p, **3 = 1640×1232 full‑FoV**, 4 = 720p). Raw V4L2 scales to
+  all cameras concurrently.
+- **Full‑FoV mode (VIO/fisheye):** mode3 **1640×1232 @ 22 fps** is 2×2‑binned over the *whole* sensor array
+  (≈160°). The 1280×720 / 1080p modes are center **crops** (1280×720 ≈ 94° H) — use 1640×1232 (or 3264×1848
+  for full width) when the wide angle matters. Verified end‑to‑end on `nvarguscamerasrc` (2026‑06‑19).
+- **Argus caps gotcha:** pin a **valid** mode/rate or you get `not-negotiated (-4)`: `1640×1232` is 22 fps,
+  `1280×720` 44 fps, `1920×1080` 30 fps. There is no 720p@30 and no 720p@110 (that was a phantom DT entry).
 - **Argus 5‑session start race (open):** launching 5 `nvarguscamerasrc` simultaneously, one source
   intermittently fails `Internal data stream error` / `not-negotiated`. 4 are reliable; 5 races. Workaround:
   restart `nvargus-daemon`, launch, and if no error in ~9 s record, else retry (a short loop lands it).
@@ -697,10 +746,12 @@ if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux m
 
 ## 7. Status & open issues
 
-**Deployed config — default boot `j106-680`** (reversible via `extlinux` LABELs; fallbacks kept):
-`Image.j106-680` (4.9.337‑tegra, patch `0001` = shared reset + **680 Mbps**) + `tegra186-j106-modes-pos.dtb`
-(6 cameras, **unique positions**, 680 timing/derated framerates, USB VBUS fix, `usb2-0` = `otg`). Board:
-`ssh nvidia@10.42.0.157` (pw `nvidia`); board sudo `echo nvidia | sudo -S …`.
+**Deployed config — default boot `j106fullfov`** (reversible via `extlinux` LABELs; fallbacks kept,
+incl. `j106-imu` and `j106-680`): `Image.j106-fullfov` (4.9.337‑tegra #4, patch `0001` = shared reset +
+**680 Mbps** + full‑FoV framerates) + `tegra186-j106-fullfov.dtb` (6 cameras, **unique positions**, 680
+timing/derated framerates incl. **mode3 = 1640×1232 full FoV**, USB VBUS fix, onboard MPU‑9250 IMU).
+Deployed & verified 2026‑06‑19. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`); board sudo
+`echo nvidia | sudo -S …`.
 
 ### ✅ Working
 - **USB host ports** (M110) — VBUS fix in `override-usb.dtsi` (stock routes VBUS through devkit
@@ -721,6 +772,18 @@ if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux m
      emulation: 55 °C → PWM 80 → ~1950 rpm, 65 °C → PWM 120 → ~2800 rpm; off when cool.
      ⚠️ **Do NOT use the device‑tree gpio‑hog** (`tx2-j106-6csi/fan-enable.dtsi`): the DTB that bundled it
      (`tegra186-j106-imu-fan.dtb`, extlinux `LABEL j106-fan`) **hangs the kernel at boot** — recover per §6.6.
+  3. **Resume re‑sync** — fixed by [`tools/j106-fan-resync`](tools/j106-fan-resync) (a `post`‑resume hook in
+     `/lib/systemd/system-sleep/`). Fan *speed* is driven by `pwm-fan` on the **AON PWM** (`pwm@c340000` =
+     pwmchip3, always‑on/SPE domain). When cool the governor sets `target_pwm=0` and pwm‑fan **disables** the
+     channel instead of actively driving 0 % duty. At cold boot the disabled pad leaves the fan off, but across
+     **SC7 suspend/resume the AON‑PWM state is lost and not restored** → the pad comes back driving the fan at
+     **full**, and because the governor still computes `target_pwm=0` (`target == cur == 0`) pwm‑fan never
+     re‑issues `pwm_config`/`pwm_enable`, so the fan **runs at full RPM forever** until a real >51 °C trip forces
+     a reprogram. Symptom: `cur_pwm=0` but the fan screams (tach ~5800 rpm). Fix = on each resume force one real
+     reprogram (`temp_control=0; target_pwm=160; sleep 1; target_pwm=0; temp_control=1`) to re‑sync the hardware,
+     then hand speed back to the governor. Verified live: stuck at `cur_pwm=0`/5795 rpm → after the kick →
+     `cur_pwm=0`/**0 rpm**. (The AUD_RST enable gate is a separate always‑on line, not involved.) Install:
+     `sudo install -m0755 tools/j106-fan-resync /lib/systemd/system-sleep/`.
 - **HDMI 5V regulator** — fixed in `override-usb.dtsi`. `vdd-hdmi` (`regulator@3`), gated by the same absent
   expander, made nvdisplay defer with `couldn't get regulator vdd_hdmi_5v0, -517`. Dropping the expander gpio
   clears it (the residual `tegra_hdmi_tmds_range_read failed` is just the EDID read with no monitor attached).

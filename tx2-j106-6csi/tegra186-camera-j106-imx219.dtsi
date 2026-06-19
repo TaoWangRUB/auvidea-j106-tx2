@@ -139,8 +139,30 @@
 	max_framerate = "30000000";						\
 	default_framerate = "30000000";
 
-/* driver table[3]: 1280x720 2x2 binned. 136e6/(3448*880 lines) = 44.8 fps max. */
+/* driver table[3]: 1640x1232 2x2-binned, FULL FoV (full sensor array, /2 each
+ * axis). FRM_LENGTH=0x06E2=1762 lines, LINE_LENGTH=0x0D78=3448. At the
+ * J106-lowered 680 Mbps PLL: 136e6/(3448*1762) = 22.4 fps max. This is the
+ * wide-angle mode for the omni/VIO rig -- 1280x720 and 1080p are center CROPS
+ * (~94 deg), this keeps the lens's full FoV. Driver register table + frmfmt
+ * entry already ship in imx219_mode_tbls.h (PLL already at 680). */
 #define IMX219_MODE3(_iface)							\
+	IMX219_MODE_COMMON(_iface)						\
+	active_w = "1640";							\
+	active_h = "1232";							\
+	line_length = "3448";							\
+	mclk_multiplier = "5.67";						\
+	pix_clk_hz = "136000000";						\
+	max_framerate = "22000000";						\
+	default_framerate = "22000000";
+
+/* driver table[4]: 1280x720 2x2-binned center crop. FRM_LENGTH=0x0370=880 lines.
+ * 136e6/(3448*880) = 44.8 fps max at the J106-lowered 680 Mbps PLL.
+ * NOTE: the stock 720p120 high-rate table is commented OUT in
+ * imx219_mode_tbls.h, so mode_table[4] = imx219_mode_1280x720_60fps (680 Mbps).
+ * The old DT "110 fps" entry was a PHANTOM: Argus advertised 1280x720@110 from
+ * this DT node, but the sensor has no 816 Mbps table to back it and fell back to
+ * the 680 Mbps register table (~44 fps). Advertise the honest rate here. */
+#define IMX219_MODE4(_iface)							\
 	IMX219_MODE_COMMON(_iface)						\
 	active_w = "1280";							\
 	active_h = "720";							\
@@ -149,19 +171,6 @@
 	pix_clk_hz = "136000000";						\
 	max_framerate = "44000000";						\
 	default_framerate = "44000000";
-
-/* driver table[4]: 1280x720 high-rate binned. Its register table keeps the
- * stock-ish 816 Mbps PLL (NOT lowered to 680) -> 163.2 Mpix/s, ~116 fps max.
- * CAUTION: if 912 Mbps was marginal on this carrier, 816 may be too. */
-#define IMX219_MODE4(_iface)							\
-	IMX219_MODE_COMMON(_iface)						\
-	active_w = "1280";							\
-	active_h = "720";							\
-	line_length = "3560";							\
-	mclk_multiplier = "6.8";						\
-	pix_clk_hz = "163200000";						\
-	max_framerate = "110000000";						\
-	default_framerate = "110000000";
 
 /* Common hw-resource block placed in every sensor node.
  * All 6 J106 sensors share ONE physical reset line (gpio 461). The patched
