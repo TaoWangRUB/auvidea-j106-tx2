@@ -89,12 +89,24 @@ Available TX2 i2c controllers: `gen1_i2c@3160000`, `gen2_i2c@c240000`,
 `cam_i2c@3180000`, `dp_aux_ch1_i2c@3190000`, `dp_aux_ch0_i2c@31b0000`,
 `gen7_i2c@31c0000`, `gen8_i2c@c250000`, `gen9_i2c@31e0000`.
 
-### IMX219 modes supported by the R32 driver
-Driver register tables (`imx219_mode_tbls.h`, in driver‑table order):
-`3264x2464@21`, `3264x1848@28`, `1920x1080@30`, **`1640x1232@30`** (2×2‑binned,
-full FoV), `1280x720@60` — the stock `1280x720@120` table is commented out.
-Native Bayer RGGB, 2 lanes. At the J106‑lowered 680 Mbps PLL the real caps are
-**15 / 20 / 30 / 22 / 44 fps**; the DT mode nodes advertise those derated rates.
+### IMX219 modes supported (as deployed on the J106)
+
+Native Bayer RGGB, 2 lanes. The DT mode index = driver register‑table index
+(`imx219_mode_tbls.h` order); `sensor_mode=N` / Argus sensor‑mode‑id select by it.
+The **fps shown is the deployed cap** — derated to the J106‑lowered **680 Mbps/lane**
+PLL (stock 912 Mbps rates in parentheses; advertising the stock rate truncates
+frames → `ChanselFault`).
+
+| mode | resolution | fps (stock) | sensor area | FoV (H) | use |
+|------|-----------|-------------|-------------|---------|-----|
+| 0 | 3264×2464 | 15 (21) | full, no bin | ~160° | full‑res stills / max detail |
+| 1 | 3264×1848 | 20 (28) | full width, H‑crop | ~160° | full **horizontal** FoV, lighter than mode0 |
+| 2 | 1920×1080 | 30 | center crop | ~94° | 1080p video (narrow) |
+| **3** | **1640×1232** | **22 (30)** | **full, 2×2 binned** | **~160°** | **full‑FoV VIO/fisheye (recommended for the omni rig)** |
+| 4 | 1280×720 | 44 (60) | center crop, 2×2 binned | ~94° | fast narrow capture |
+
+The stock `1280x720@120` register table is commented out, so there is **no**
+720p high‑rate mode (an earlier DT advertised a phantom 720p@110 — removed).
 
 ---
 
