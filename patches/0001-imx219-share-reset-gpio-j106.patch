@@ -42,12 +42,21 @@ NVIDIA's stock PLL = 912 Mbps/lane with zero margin; marginal on the J106 CSI
 traces. Reduce PLL_VT_MPY 0x39->0x2B and PLL_OP_MPY 0x72->0x55 across modes 0-4
 = 680 Mbps/lane (-25%), matching the Auvidea TX1 production BSP.
 
+5) Full-FoV 1640x1232 mode + honest binned framerates (imx219_mode_tbls.h)
+
+The stock driver already ships the 1640x1232 2x2-binned register table (full
+sensor FoV, ~160 deg) but advertised it (and 1280x720) at their stock rates.
+At the J106-lowered 680 Mbps PLL those modes really cap lower: 1640x1232 ~22 fps
+and 1280x720 ~44 fps. Add imx219_22fps/imx219_44fps and point the two frmfmt
+entries at them, so Argus/V4L2 report the rate the sensor timing can deliver
+(advertising more truncates frames -> ChanselFault). Pairs with the matching DT
+mode nodes (mode3=1640x1232, mode4=1280x720) in tegra186-camera-j106-imx219.dtsi.
+
 Target: L4T R32.7.6 (kernel 4.9.337).
 Apply from the kernel source root (the dir that contains kernel/nvidia):
     patch -p1 < patches/0001-imx219-share-reset-gpio-j106.patch
-
---- a/kernel/nvidia/drivers/media/i2c/imx219.c	2026-06-16 14:30:55.699036380 +0200
-+++ b/kernel/nvidia/drivers/media/i2c/imx219.c	2026-06-16 14:30:55.702358397 +0200
+--- a/kernel/nvidia/drivers/media/i2c/imx219.c
++++ b/kernel/nvidia/drivers/media/i2c/imx219.c
 @@ -24,6 +24,10 @@
  #include <linux/of.h>
  #include <linux/of_device.h>
@@ -247,8 +256,8 @@ Apply from the kernel source root (the dir that contains kernel/nvidia):
  	tegracam_v4l2subdev_unregister(priv->tc_dev);
  	tegracam_device_unregister(priv->tc_dev);
  
---- a/kernel/nvidia/drivers/media/i2c/imx219_mode_tbls.h	2026-06-16 14:30:55.700689842 +0200
-+++ b/kernel/nvidia/drivers/media/i2c/imx219_mode_tbls.h	2026-06-16 14:30:55.703567567 +0200
+--- a/kernel/nvidia/drivers/media/i2c/imx219_mode_tbls.h
++++ b/kernel/nvidia/drivers/media/i2c/imx219_mode_tbls.h
 @@ -107,11 +107,11 @@
  	{0x0304, 0x03},
  	{0x0305, 0x03},
@@ -319,3 +328,32 @@ Apply from the kernel source root (the dir that contains kernel/nvidia):
  	{IMX219_TABLE_END, 0x00}
  };
  
+@@ -372,6 +372,17 @@
+ 	60,
+ };
+ 
++/* J106-derated rates: at the lowered 680 Mbps PLL the binned modes cap below
++ * their stock rates (1640x1232 ~22 fps, 1280x720 ~44 fps). Advertise the real
++ * caps so Argus does not request a rate the sensor timing cannot deliver
++ * (which truncates frames -> ChanselFault). See the matching DT mode nodes. */
++static const int imx219_22fps[] = {
++	22,
++};
++
++static const int imx219_44fps[] = {
++	44,
++};
+ 
+ /*
+  * WARNING: frmfmt ordering need to match mode definition in
+@@ -382,8 +393,8 @@
+ 	/* Add modes with no device tree support after below */
+ 	{{3264, 1848},	imx219_28fps, 1, 0, IMX219_MODE_3264x1848_28FPS},
+ 	{{1920, 1080},	imx219_30fps, 1, 0, IMX219_MODE_1920x1080_30FPS},
+-	{{1640, 1232},	imx219_30fps, 1, 0, IMX219_MODE_1640x1232_30FPS},
+-	{{1280, 720},	imx219_60fps, 1, 0, IMX219_MODE_1280x720_60FPS},
++	{{1640, 1232},	imx219_22fps, 1, 0, IMX219_MODE_1640x1232_30FPS},
++	{{1280, 720},	imx219_44fps, 1, 0, IMX219_MODE_1280x720_60FPS},
+ };
+ 
+ #endif /* __IMX219_I2C_TABLES__ */
