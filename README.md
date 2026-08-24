@@ -520,6 +520,7 @@ two device‑tree files plus **one** driver patch — nothing else is rebuilt:
 | [`tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi`](tx2-j106-6csi/tegra186-camera-j106-imx219.dtsi) | the 6 cameras: sensors, reset hog, MCLK pinmux, NVCSI/VI channels, sensor modes, `tegra-camera-platform` (Argus) |
 | [`tx2-j106-6csi/override-usb.dtsi`](tx2-j106-6csi/override-usb.dtsi) | USB VBUS (host) + OTG device‑mode |
 | [`patches/0001-imx219-share-reset-gpio-j106.patch`](patches/0001-imx219-share-reset-gpio-j106.patch) | imx219 driver: shared reset GPIO (no assert/free) + **boot-time reset pulse** (port-D shifter fix) + **`j106_reset_recover` sysfs** (reboot-free recovery) + 680 Mbps MIPI rate |
+| [`patches/0002-imx296-tegracam-j106.patch`](patches/0002-imx296-tegracam-j106.patch) | **new** imx296 tegracam driver — R32.7.6 ships none. Port F only; independent of `0001` (disjoint files, either order) |
 
 Capture path (3‑hop on tegra186):
 `sensor (imx219 @0x10/0x12) → NVCSI@150c0000 channel@N → VI@15700000 port@N → /dev/videoN`, then
@@ -644,6 +645,48 @@ Further options (now optional, not required): `nvarguscamerasrc` runtime params 
 
 ---
 
+### Stage 7 — Port F: IMX296 global shutter (mixed 5×IMX219 + 1×IMX296)
+
+Port F was repopulated with a **Sony IMX296LQR** (colour global shutter). R32.7.6 has **no `imx296`
+driver at all**, so the sensor was invisible and the board ran 5 cameras. Fixed by
+[`patches/0002-imx296-tegracam-j106.patch`](patches/0002-imx296-tegracam-j106.patch) plus port-F
+changes in the camera dtsi. Everything below was measured on the board, not assumed.
+
+| Issue | Symptom | Fix |
+|---|---|---|
+| No driver in R32.7.6 | sensor absent from V4L2/Argus; 5 cameras | new tegracam driver (patch `0002`), modelled on this tree's `imx219.c`, register semantics from the Sony datasheet with mainline `imx296.c` as cross-check |
+| Sensor answers at **two** i²c addresses | `0x18` *and* `0x34` both ACK on i2c‑7 | one die: IMX296 has a `SLAMODE`-strapped address (`0x36`, so this module straps SLAMODE=0) **and** a common address (`0x1a`) valid in both polarities; the carrier shifter XORs addr bit 1 → `0x34`/`0x18`. DT declares **`0x18`** (from the common address) so it survives a differently-strapped module |
+| `SENSOR_INFO` reads 0 | identification appears to fail | that register only reads while **out of standby** — write `CTRL00 = 0` and settle first, then `(v>>6)&0x1ff` must be `296` |
+| Shared reset line | would reset the 5 IMX219s | the IMX296 node declares **no `reset-gpios`** and the driver never requests/frees/drives it — unlike `0001`, a from-scratch driver has no such obligation. Per-sensor control = software standby |
+| IMX296 needs 37.125/54/74.25 MHz INCK; J106 fans out **24 MHz** | would be unbridgeable | the module is **self-clocked** — `extperiph1` had `enable_count=0` while the sensor still left standby and answered, and the datasheet's power-on sequence requires INCK *before* register communication. Its node names no `mclk` |
+| Which INCK? (no register reports it) | unknown oscillator | **measured**: leave `INCKSEL` at the sensor's 74.25 MHz power-on default and read frame rate back — timing scales by (actual/assumed), so 60.4 / 43.9 / 30.2 fps ⇒ 74.25 / 54 / 37.125 MHz. Got 600 frames in 13.905 s = 43.15 fps vs 13.664 s expected for **54 MHz** (+0.24 s fixed stream-start overhead, identical on a 180-frame run); the others were off by 4.0 s and 6.0 s. → `inck-frequency = <54000000>` |
+| Single lane | — | IMX296 is a **1-lane** sensor at 1188 Mbps: `bus-width = <1>` at all three hops (sensor → nvcsi → vi) and `num_csi_lanes` 12 → **11** (5×2 + 1×1) |
+| Embedded data | mis-framed capture if wrong | the sensor emits **2 lines of DT 0x12 embedded data** per frame → `embedded_metadata_height = "2"`. Full vertical structure: FS + 2 embedded + 6 null (0x10) + 4 optical black (0x37) + active (0x2b) + FE |
+| Bayer order | wrong colours | **BGGR** (`pixel_phase = "bggr"`), not the IMX219s' RGGB |
+
+**Timing model (counter-intuitive).** `HMAX` is a line length in units of an internal reference the
+sensor holds at **74.25 MHz regardless of INCK**, so all line/frame arithmetic uses that constant.
+Datasheet closes the loop: `HMAX` 1100 / 74.25 MHz = 14.815 µs/line, and
+1/(`VMAX` 1118 × 14.815 µs) = **60.38 fps** vs the datasheet's stated 60.3.
+
+**Verified on the board** (2026‑08‑24, `LABEL j106imx296`):
+- `imx296 7-0018` binds; probe logs `detected IMX296LQ (colour) (sensor info 0x4a00)`.
+- **No regression**: all five IMX219s still bind (`1-0010 1-0012 2-0010 2-0012 7-0010`) and still capture.
+- `/dev/video5` = `vi-output, imx296 7-0018`; raw V4L2 `BG10` 1456×1088 @ ~60 fps, 600/600 frames, no drops.
+- Argus enumerates **6** cameras (`sensor-id=0..5` all OK); sensor-id 5 advertises
+  `1456 x 1088 FR = 60.300000 fps`, gain 0–48 dB, exposure 30 µs–500 ms — exactly the DT ranges.
+- Controls verified by register read-back: `gain=400` → `GAIN`(0x3204) = `0x0190` = 400;
+  `exposure=16000 µs` → `SHS1` = 39, matching `1118 − (16000 µs × 74.25 MHz − 1059)/1100`.
+- Capture: [`captures/imx296_portF_argus.jpg`](captures/imx296_portF_argus.jpg).
+
+⚠️ **Gotcha — `override_enable=1` collapses the sensor to 2 fps.** With `override_enable=1`, tegracam
+re-applies the `frame_rate` control at *every* stream start, and that control sits at its DT
+**minimum** (`min_framerate = "2000000"` = 2 fps, not its 60.3 fps default). That sets `VMAX` = 33750,
+the sensor genuinely streams at 2 fps, and VI then fails with `PXL_SOF syncpt timeout` — and it
+*sticks for the rest of the boot*. This is tegracam behaviour (IMX219's DT has the same
+`min_framerate`), not a driver bug: with `override_enable` at its default 0 the sensor streams fine.
+If raw capture suddenly returns 0 bytes, check `VMAX` and reboot to clear the control.
+
 ## 6. Build, apply the patch & flash
 
 Builds run on an **x86‑64 Linux host**; artifacts deploy to the TX2 **over SSH**. Deployment is **always
@@ -656,11 +699,12 @@ lives in `j106build/` (git‑ignored, reproducible).
 - The board's own kernel config: `scp nvidia@<board>:/proc/config.gz . && zcat config.gz > board-config`
   (keeps modules compatible).
 
-### 6.2 Build the patched kernel `Image` (applies patch `0001`: shared reset + 680 Mbps)
+### 6.2 Build the patched kernel `Image` (applies patch `0001`: shared reset + 680 Mbps, and `0002`: imx296 driver)
 ```bash
 cd j106build/r3276
 patch -p1 -d ksrc < ../../patches/0001-imx219-share-reset-gpio-j106.patch   # idempotent; skip if applied
-cp board-config kout/.config
+patch -p1 -d ksrc < ../../patches/0002-imx296-tegracam-j106.patch          # port-F IMX296; disjoint from 0001
+cp board-config kout/.config   # must contain CONFIG_VIDEO_IMX219=y and CONFIG_VIDEO_IMX296=y
 export CROSS_COMPILE=$PWD/l4t-gcc/.../bin/aarch64-linux-gnu-          # or aarch64-buildroot-linux-gnu-
 make -C ksrc/kernel/kernel-4.9 O=$PWD/kout ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE LOCALVERSION=-tegra olddefconfig
 make -C ksrc/kernel/kernel-4.9 O=$PWD/kout ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE LOCALVERSION=-tegra -j$(nproc) Image
@@ -762,14 +806,21 @@ if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux m
 
 ## 7. Status & open issues
 
-**Deployed config — default boot `j106fullfov`** (reversible via `extlinux` LABELs; fallbacks kept,
-incl. `j106-imu` and `j106-680`): `Image.j106-fullfov` (4.9.337‑tegra #4, patch `0001` = shared reset +
-**680 Mbps** + full‑FoV framerates) + `tegra186-j106-fullfov.dtb` (6 cameras, **unique positions**, 680
-timing/derated framerates incl. **mode3 = 1640×1232 full FoV**, USB VBUS fix, onboard MPU‑9250 IMU).
-Deployed & verified 2026‑06‑19. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`); board sudo
-`echo nvidia | sudo -S …`.
+**Deployed config — default boot `j106imx296`** (reversible via `extlinux` LABELs; fallbacks kept,
+incl. `j106fullfov`, `j106-imu`, `j106-680`): `Image.j106imx296` (4.9.337‑tegra #5, patches `0001`
+= imx219 shared reset + 680 Mbps, and `0002` = **new imx296 driver**) + `j106imx296.dtb`
+(**5×IMX219 A–E + 1×IMX296 port F**, unique positions, 680 timing incl. mode3 = 1640×1232 full FoV,
+USB VBUS fix, onboard MPU‑9250 IMU). Deployed & verified 2026‑08‑24. Board: `ssh nvidia@10.42.0.157`
+(pw `nvidia`); board sudo `echo nvidia | sudo -S …`.
+
+> **Camera population changed 2026‑08‑24**: port F is now a **Sony IMX296LQR global shutter** module,
+> not an IMX219 — see §5 *Stage 7*. Ports A–E are unchanged IMX219 and were verified non‑regressed.
 
 ### ✅ Working
+- **IMX296 global shutter on port F** — `imx296 7-0018` → `/dev/video5`, raw V4L2 `BG10` 1456×1088
+  @ ~60 fps (600/600 frames, no drops) and Argus `sensor-id=5` (6 cameras total). New tegracam driver
+  (`patches/0002`); INCK **measured** at 54 MHz; single-lane routing; no reset-gpio so the five IMX219s
+  are untouched. See §5 *Stage 7* (incl. the `override_enable=1` → 2 fps gotcha).
 - **USB host ports** (M110) — VBUS fix in `override-usb.dtsi` (stock routes VBUS through devkit
   `pca953x` expanders absent on the carrier → `‑517` defer; fixed regulator forced always‑on).
 - **Fan control** — needs **two independent** fixes (both now in place):
@@ -856,6 +907,14 @@ Deployed & verified 2026‑06‑19. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open / hardware‑limited
+- **IMX296 ISP colour tuning (port F)** — Argus output from the IMX296 has a strong cyan/blue cast.
+  `/var/nvidia/nvcam/settings/camera_overrides.isp` is **Arducam IMX219 tuning** applied to every
+  sensor; there is no IMX296 tuning file. Raw V4L2 data is correct (BGGR, black level ~60), so this is
+  purely an ISP/AWB tuning gap — the same class of issue §5 *Stage 5b* fixed for IMX219.
+- **IMX296 lens descriptor is a placeholder** — `module5`'s `drivernode1` still points at
+  `j106_lens_imx219@J106` because the IMX296 module's optics have not been characterised. Replace with
+  a dedicated `j106_lens_imx296` node once focal length / f-number are measured (affects Argus metadata
+  only, not capture).
 - **Micro‑USB Linux device‑mode gadget (`/dev/ttyACM0` / `192.168.55.1`) — will NOT work on M110 J17.** This is
   USB0/OTG (J106 → M110 **J17**), *separate* from UART0 (and *separate* from recovery, which **does** work —
   see Working). Per the M110 PDF, J17 is a **host‑leaning port**: `USB0_ID` floats → host, and `USB0_VBUS` is

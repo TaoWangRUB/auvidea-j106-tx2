@@ -197,6 +197,98 @@
 	vif-supply = <&cam_dummy_reg>;					\
 	vdig-supply = <&cam_dummy_reg>;
 
+/* ===================== IMX296 (CSI-F) =====================
+ *
+ * Port F carries a Sony IMX296LQR global shutter module instead of an IMX219.
+ * Three things differ from the IMX219 ports and all three are load-bearing:
+ *
+ *  - ONE MIPI lane (not two). The IMX296 is a single-lane sensor at 1188 Mbps;
+ *    bus-width must be 1 at all three hops (sensor -> nvcsi -> vi).
+ *  - NO reset-gpios and NO mclk. The shared reset line is already released
+ *    high by the j106-camera-reset-release hog and the five IMX219s depend on
+ *    it staying that way, so the imx296 driver never touches it. The module is
+ *    self-clocked, so it does not need (and cannot use) the shared 24 MHz
+ *    extperiph1 MCLK - the IMX296 only accepts 37.125/54/74.25 MHz.
+ *  - Bayer order is BGGR, not RGGB.
+ *
+ * embedded_metadata_height = "2": the sensor emits two lines of embedded data
+ * (CSI-2 DT 0x12) ahead of the image. Per the datasheet the full vertical
+ * structure is FS + 2 embedded + 6 null (DT 0x10) + 4 optical black (DT 0x37)
+ * + active image (DT 0x2b) + FE; only the DT 0x12 lines are counted here.
+ */
+#define IMX296_MODE_COMMON(_iface)						\
+	mclk_khz = "74250";							\
+	num_lanes = "1";							\
+	tegra_sinterface = _iface;						\
+	phy_mode = "DPHY";							\
+	discontinuous_clk = "no";						\
+	dpcm_enable = "false";							\
+	cil_settletime = "0";							\
+	mode_type = "bayer";							\
+	pixel_phase = "bggr";							\
+	csi_pixel_bit_depth = "10";						\
+	readout_orientation = "0";						\
+	inherent_gain = "1";							\
+	gain_factor = "10";							\
+	min_gain_val = "0";			/* 0 dB */			\
+	max_gain_val = "480";			/* 48 dB */			\
+	step_gain_val = "1";			/* 0.1 dB */			\
+	default_gain = "0";							\
+	min_hdr_ratio = "1";							\
+	max_hdr_ratio = "1";							\
+	framerate_factor = "1000000";						\
+	min_framerate = "2000000";						\
+	step_framerate = "1";							\
+	exposure_factor = "1000000";						\
+	min_exp_time = "30";							\
+	max_exp_time = "500000";						\
+	step_exp_time = "1";							\
+	default_exp_time = "16000";						\
+	embedded_metadata_height = "2";
+
+/* All-pixel scan mode, 1456x1088 RAW10, 60.3 fps (datasheet).
+ * line_length 1760 px = HMAX 1100 x (1188 Mbps / 10 bpp) / 74.25 MHz, i.e. the
+ * 14.815 us line time expressed in pixels at the 118.8 Mpx/s output rate. */
+#define IMX296_MODE0(_iface)							\
+	IMX296_MODE_COMMON(_iface)						\
+	active_w = "1456";							\
+	active_h = "1088";							\
+	line_length = "1760";							\
+	mclk_multiplier = "1.6";						\
+	pix_clk_hz = "118800000";						\
+	max_framerate = "60300000";						\
+	default_framerate = "60300000";
+
+/* No clocks/mclk and no reset-gpios on purpose - see the note above.
+ *
+ * inck-frequency is the module's own oscillator. MEASURED, not assumed: the
+ * sensor has no register reporting its input clock, so it was determined by
+ * capturing at the sensor's power-on default (74.25 MHz) and reading the frame
+ * rate back - timing scales by (actual INCK / assumed INCK), so the three legal
+ * clocks are cleanly distinguishable at 60.4 / 43.9 / 30.2 fps. Measured
+ * 600 frames in 13.905 s = 43.15 fps against 13.664 s expected for 54 MHz
+ * (the +0.24 s gap is fixed stream-start overhead - it is identical on a
+ * 180-frame run - not a rate error); 74.25 MHz was off by 4.0 s and
+ * 37.125 MHz by 6.0 s. Hence 54 MHz.
+ *
+ * The driver accepts only 37125000, 54000000 or 74250000 and uses this to pick
+ * INCKSEL[0..3] and CTRL418C.
+ * Physical size: 1456 x 1088 at the IMX296's 3.45 um pixel pitch. */
+#define IMX296_HW_RESOURCES							\
+	compatible = "nvidia,imx296";						\
+	devnode = "video0";							\
+	physical_w = "5.023";							\
+	physical_h = "3.754";							\
+	sensor_model = "imx296";						\
+	use_sensor_mode_id = "true";						\
+	inck-frequency = <54000000>;		/* measured - see above */	\
+	avdd-reg = "vana";							\
+	iovdd-reg = "vif";							\
+	dvdd-reg = "vdig";							\
+	vana-supply = <&cam_dummy_reg>;						\
+	vif-supply = <&cam_dummy_reg>;						\
+	vdig-supply = <&cam_dummy_reg>;
+
 / {
 	/* Camera power on the J106: the Raspberry Pi IMX219 modules are powered
 	 * directly from the carrier's CSI connectors (onboard LDOs), so there is
@@ -315,7 +407,7 @@
 					status = "okay";
 					j106_vi_in5: endpoint {
 						port-index = <5>;	/* CSI_F */
-						bus-width = <2>;
+						bus-width = <1>;	/* IMX296: single lane */
 						remote-endpoint = <&j106_csi_out5>;
 						status = "okay";
 					};
@@ -470,8 +562,8 @@
 						status = "okay";
 						j106_csi_in5: endpoint@10 {
 							port-index = <5>;
-							bus-width = <2>;
-							remote-endpoint = <&j106_imx219_out5>;
+							bus-width = <1>;	/* IMX296: single lane */
+							remote-endpoint = <&j106_imx296_out5>;
 							status = "okay";
 						};
 					};
@@ -646,22 +738,27 @@
 			};
 		};
 
-		imx219_f@12 {
-			IMX219_HW_RESOURCES
-			reg = <0x12>;
-			mode0 { IMX219_MODE0("serial_f") };
-			mode1 { IMX219_MODE1("serial_f") };
-			mode2 { IMX219_MODE2("serial_f") };
-			mode3 { IMX219_MODE3("serial_f") };
-			mode4 { IMX219_MODE4("serial_f") };
+		/* CSI-F: IMX296 global shutter.
+		 *
+		 * reg = 0x18 and not 0x34: the IMX296 answers at TWO addresses -
+		 * a SLAMODE-strapped one (0x36 here, so this module straps
+		 * SLAMODE=0) and a common one (0x1a) that is valid in both
+		 * SLAMODE polarities. The carrier's address shifter XORs address
+		 * bit 1, mapping them to 0x34 and 0x18 respectively. Using the
+		 * common address keeps this node correct if the module is ever
+		 * swapped for a differently-strapped one. */
+		imx296_f@18 {
+			IMX296_HW_RESOURCES
+			reg = <0x18>;
+			mode0 { IMX296_MODE0("serial_f") };
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
 				port@0 {
 					reg = <0>;
-					j106_imx219_out5: endpoint {
+					j106_imx296_out5: endpoint {
 						port-index = <5>;
-						bus-width = <2>;
+						bus-width = <1>;
 						remote-endpoint = <&j106_csi_in5>;
 					};
 				};
@@ -683,8 +780,8 @@
 	tegra-camera-platform {
 		compatible = "nvidia, tegra-camera-platform";
 
-		/* 6 cameras x 2 lanes = 12 lanes total */
-		num_csi_lanes = <12>;
+		/* 5 x IMX219 x 2 lanes + 1 x IMX296 x 1 lane = 11 lanes total */
+		num_csi_lanes = <11>;
 		max_lane_speed = <1500000>;
 		min_bits_per_pixel = <10>;
 		vi_peak_byte_per_pixel = <2>;
@@ -781,15 +878,21 @@
 			};
 			module5 {
 				status = "okay";
-				badge = "imx219_bottomright_csif";
+				badge = "imx296_bottomright_csif";
 				position = "bottomright";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
 					pcl_id = "v4l2_sensor";
-					devname = "imx219 7-0012";
-					proc-device-tree = "/proc/device-tree/i2c@c250000/imx219_f@12";
+					devname = "imx296 7-0018";
+					proc-device-tree = "/proc/device-tree/i2c@c250000/imx296_f@18";
 				};
+				/* NOTE: reuses the IMX219 lens descriptor. The IMX296
+				 * module's optics have not been characterised, so
+				 * rather than invent focal length / f-number values
+				 * this points at the existing descriptor to keep
+				 * Argus happy. Replace with a dedicated
+				 * j106_lens_imx296 node once the lens is measured. */
 				drivernode1 {
 					status = "okay";
 					pcl_id = "v4l2_lens";

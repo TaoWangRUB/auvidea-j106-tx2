@@ -1,0 +1,1084 @@
+Subject: [PATCH] imx296: Sony IMX296 global shutter sensor support (J106 / TX2)
+
+Adds a tegracam driver for the Sony IMX296 so CSI port F of the Auvidea J106
+can carry an IMX296 global shutter module while ports A-E keep their IMX219s.
+L4T R32.7.6 ships no imx296 driver at all, so the sensor is otherwise invisible
+to V4L2 and Argus.
+
+Register semantics follow the Sony IMX296LQR-C datasheet; the values match the
+upstream mainline driver (drivers/media/i2c/imx296.c) exactly, which is used as
+a cross-check. The ~40-register initialisation sequence in imx296_mode_tbls.h is
+vendor tuning magic that the datasheet does not document, and is reproduced
+verbatim from mainline.
+
+Two J106 specifics shape the driver:
+
+1) No reset gpio, ever.
+
+   All six J106 CSI reset pins are ONE physical line, already released high at
+   boot by the j106-camera-reset-release gpio-hog, and the five IMX219s depend
+   on it staying high. Unlike the stock tegracam imx219 driver - which makes
+   reset-gpios mandatory and had to be patched to tolerate the sharing (see
+   0001) - a driver written from scratch is under no such obligation: the
+   IMX296 node declares no reset-gpios and this driver never requests, frees or
+   drives that line. There is therefore no code path by which bringing port F
+   up or down can reset the other five sensors. Per-sensor control uses the
+   IMX296's software standby (CTRL00) instead.
+
+2) The input clock is a device tree property, not the shared MCLK.
+
+   The IMX296 accepts only 37.125/54/74.25 MHz INCK, none of which is the
+   24 MHz the J106 fans out to all six sensors - but the fitted module has its
+   own oscillator, so it does not need the shared clock and its node names no
+   mclk. INCKSEL[0..3] and CTRL418C are selected from an "inck-frequency"
+   property, which accepts only those three values and defaults to 74.25 MHz
+   (the sensor's own power-on default).
+
+   Note HMAX is a line length in units of an internal reference the sensor
+   holds at 74.25 MHz REGARDLESS of INCK, so all line/frame timing arithmetic
+   is written against that constant. Datasheet cross-check: HMAX 1100 /
+   74.25 MHz = 14.815 us per line, and 1 / (VMAX 1118 * 14.815 us) = 60.38 fps
+   against the datasheet's stated 60.3 fps for All-pixel scan mode.
+
+Exposes one mode, 1456x1088 RAW10 (Bayer BGGR for the colour LQR part) at
+60.3 fps, with gain (GAIN, 0.1 dB steps 0..480), exposure (SHS1, clamped
+against the live VMAX rather than a constant) and frame rate (VMAX) controls,
+and group hold via CTRL08 REGHOLD.
+
+The sensor is identified before registering: SENSOR_INFO (0x3148) must report
+model 296, i.e. (value >> 6) & 0x1ff == 296, and the mono/colour variant is
+logged from bit 15. The sensor must be taken out of standby first - that
+register reads back zero while standby is asserted.
+
+This patch is independent of 0001-imx219-share-reset-gpio-j106.patch: they
+touch disjoint files and can be applied or reverted in either order.
+---
+--- a/kernel/nvidia/drivers/media/i2c/imx296.c
++++ b/kernel/nvidia/drivers/media/i2c/imx296.c
+@@ -0,0 +1,856 @@
++/*
++ * imx296.c - Sony IMX296 global shutter sensor driver (tegracam)
++ *
++ * Copyright (c) 2026, Tao Wang.
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ *
++ * Written for the Auvidea J106 carrier (Jetson TX2), where CSI port F carries
++ * an IMX296 while ports A-E carry IMX219. Two J106 specifics shape this
++ * driver, see the notes at imx296_power_get() and imx296_parse_dt():
++ *
++ *  - all six CSI reset pins are ONE line, already released high by a gpio-hog,
++ *    so this driver never requests or drives a reset gpio at all;
++ *  - the fitted module has its own oscillator, so it does not need the shared
++ *    24 MHz MCLK that feeds the IMX219s (which the IMX296 could not use anyway
++ *    - it only accepts 37.125/54/74.25 MHz).
++ */
++
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++#include <linux/module.h>
++#include <linux/seq_file.h>
++#include <linux/of.h>
++#include <linux/of_device.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/i2c.h>
++#include <linux/math64.h>
++
++#include <media/tegra_v4l2_camera.h>
++#include <media/tegracam_core.h>
++
++#include "imx296_mode_tbls.h"
++
++/* Register addresses (16-bit address, 8-bit data).
++ * Registers wider than 8 bits are little-endian across consecutive
++ * addresses - see imx296_read_mbreg()/imx296_write_mbreg(). */
++#define IMX296_CTRL00				0x3000
++#define IMX296_CTRL00_STANDBY			BIT(0)
++#define IMX296_CTRL08				0x3008
++#define IMX296_CTRL08_REGHOLD			BIT(0)
++#define IMX296_VMAX				0x3010	/* 24-bit, VMAX[19:0] */
++#define IMX296_HMAX				0x3014	/* 16-bit */
++#define IMX296_INCKSEL(n)			(0x3089 + (n))
++#define IMX296_SHS1				0x308d	/* 24-bit */
++#define IMX296_SENSOR_INFO			0x3148	/* 16-bit */
++#define IMX296_SENSOR_INFO_MONO			BIT(15)
++#define IMX296_GAIN				0x3204	/* 16-bit */
++#define IMX296_CTRL418C				0x418c
++
++/* Sensor limits */
++#define IMX296_MODEL_ID				296
++#define IMX296_GAIN_MIN				0	/* 0 dB */
++#define IMX296_GAIN_MAX				480	/* 48 dB, 0.1 dB step */
++#define IMX296_MIN_VBLANK			30	/* lines */
++#define IMX296_MAX_VMAX				0xfffff	/* VMAX is 20-bit */
++#define IMX296_HMAX_DEFAULT			1100	/* 44Ch, datasheet */
++
++/*
++ * HMAX is a line length in units of an internal reference that the sensor
++ * keeps at 74.25 MHz REGARDLESS of the external INCK - so all line/frame time
++ * arithmetic below is written against this constant, not against the board's
++ * input clock. Datasheet cross-check: HMAX 1100 / 74.25 MHz = 14.815 us per
++ * line, and 1 / (VMAX 1118 * 14.815 us) = 60.38 fps versus the datasheet's
++ * stated 60.3 fps for All-pixel scan mode.
++ */
++#define IMX296_INTERNAL_CLK_HZ			74250000ULL
++
++/*
++ * Exposure time [s] = (1H period) x (lines per frame - SHS1) + 14.26 us
++ * (datasheet, "Calculation Formula of Exposure Time"). 14.26 us expressed in
++ * internal-clock ticks: 14.26e-6 * 74.25e6 = 1058.8, rounded to 1059.
++ */
++#define IMX296_EXP_OFFSET_TICKS			1059
++
++/*
++ * INCK-dependent register values (datasheet "Register List of All-pixel scan
++ * mode"). These match the upstream mainline driver exactly.
++ */
++struct imx296_clk_params {
++	u32 freq;
++	u8 incksel[4];
++	u8 ctrl418c;
++};
++
++static const struct imx296_clk_params imx296_clk_params[] = {
++	{ 37125000, { 0x80, 0x0b, 0x80, 0x08 }, 116 },
++	{ 54000000, { 0xb0, 0x0f, 0xb0, 0x0c }, 168 },
++	{ 74250000, { 0x80, 0x0f, 0x80, 0x0c }, 232 },
++};
++
++/* The sensor powers up configured for 74.25 MHz, so that is also the default
++ * when the device tree does not say otherwise. Leaving it at the default has a
++ * useful side effect during bring-up on an unknown module: since frame timing
++ * scales by (actual INCK / assumed INCK), the observed frame rate identifies
++ * the real input clock - ~60.4 fps => 74.25 MHz, ~43.9 => 54 MHz,
++ * ~30.2 => 37.125 MHz. */
++#define IMX296_DEFAULT_INCK_HZ			74250000
++
++static const struct of_device_id imx296_of_match[] = {
++	{ .compatible = "nvidia,imx296", },
++	{ },
++};
++MODULE_DEVICE_TABLE(of, imx296_of_match);
++
++static const u32 ctrl_cid_list[] = {
++	TEGRA_CAMERA_CID_GAIN,
++	TEGRA_CAMERA_CID_EXPOSURE,
++	TEGRA_CAMERA_CID_FRAME_RATE,
++	TEGRA_CAMERA_CID_SENSOR_MODE_ID,
++};
++
++struct imx296 {
++	struct i2c_client		*i2c_client;
++	struct v4l2_subdev		*subdev;
++	struct camera_common_data	*s_data;
++	struct tegracam_device		*tc_dev;
++
++	const struct imx296_clk_params	*clk_params;
++	u32				frame_length;	/* VMAX, lines */
++	u32				hmax;
++	bool				mono;
++};
++
++static const struct regmap_config sensor_regmap_config = {
++	.reg_bits = 16,
++	.val_bits = 8,
++	.cache_type = REGCACHE_RBTREE,
++	.use_single_rw = true,
++};
++
++static inline int imx296_read_reg(struct camera_common_data *s_data,
++	u16 addr, u8 *val)
++{
++	int err = 0;
++	u32 reg_val = 0;
++
++	err = regmap_read(s_data->regmap, addr, &reg_val);
++	*val = reg_val & 0xff;
++
++	return err;
++}
++
++static inline int imx296_write_reg(struct camera_common_data *s_data,
++	u16 addr, u8 val)
++{
++	int err = 0;
++
++	err = regmap_write(s_data->regmap, addr, val);
++	if (err)
++		dev_err(s_data->dev, "%s: i2c write failed, 0x%x = %x",
++			__func__, addr, val);
++
++	return err;
++}
++
++/* Multi-byte registers are little-endian across consecutive addresses. */
++static int imx296_read_mbreg(struct imx296 *priv, u16 addr, u32 *val,
++	size_t nbytes)
++{
++	unsigned int i;
++	int err;
++	u8 byte;
++
++	*val = 0;
++	for (i = 0; i < nbytes; i++) {
++		err = imx296_read_reg(priv->s_data, addr + i, &byte);
++		if (err)
++			return err;
++		*val |= (u32)byte << (8 * i);
++	}
++
++	return 0;
++}
++
++static int imx296_write_mbreg(struct imx296 *priv, u16 addr, u32 val,
++	size_t nbytes)
++{
++	unsigned int i;
++	int err;
++
++	for (i = 0; i < nbytes; i++) {
++		err = imx296_write_reg(priv->s_data, addr + i,
++			(val >> (8 * i)) & 0xff);
++		if (err)
++			return err;
++	}
++
++	return 0;
++}
++
++static int imx296_write_table(struct imx296 *priv, const imx296_reg table[])
++{
++	return regmap_util_write_table_8(priv->s_data->regmap, table, NULL, 0,
++		IMX296_TABLE_WAIT_MS, IMX296_TABLE_END);
++}
++
++static int imx296_set_group_hold(struct tegracam_device *tc_dev, bool val)
++{
++	struct camera_common_data *s_data = tc_dev->s_data;
++
++	return imx296_write_reg(s_data, IMX296_CTRL08,
++		val ? IMX296_CTRL08_REGHOLD : 0);
++}
++
++/*
++ * Gain. The sensor's GAIN register is in 0.1 dB steps, 0..480 (0..48 dB: the
++ * first 24 dB analog, the rest analog + digital). The device tree expresses
++ * gain in dB scaled by gain_factor, so the conversion is a plain rescale -
++ * the same shape imx185.c uses for its dB-valued gain register.
++ */
++static int imx296_set_gain(struct tegracam_device *tc_dev, s64 val)
++{
++	struct camera_common_data *s_data = tc_dev->s_data;
++	struct device *dev = tc_dev->dev;
++	struct imx296 *priv = (struct imx296 *)tc_dev->priv;
++	const struct sensor_mode_properties *mode =
++		&s_data->sensor_props.sensor_modes[s_data->mode_prop_idx];
++	u32 gain;
++
++	if (val < mode->control_properties.min_gain_val)
++		val = mode->control_properties.min_gain_val;
++	else if (val > mode->control_properties.max_gain_val)
++		val = mode->control_properties.max_gain_val;
++
++	/* val is dB * gain_factor; register step is 0.1 dB */
++	gain = (u32)div64_u64((u64)val * 10,
++		(u64)mode->control_properties.gain_factor);
++
++	if (gain > IMX296_GAIN_MAX)
++		gain = IMX296_GAIN_MAX;
++
++	dev_dbg(dev, "%s: val: %lld (/%d) [dB], gain reg: %u [0.1 dB]\n",
++		__func__, val, mode->control_properties.gain_factor, gain);
++
++	return imx296_write_mbreg(priv, IMX296_GAIN, gain, 2);
++}
++
++/*
++ * Frame rate is set through VMAX (total lines per frame):
++ *   fps = 1 / (VMAX * HMAX / 74.25 MHz)  =>  VMAX = 74.25 MHz / (fps * HMAX)
++ */
++static int imx296_set_frame_rate(struct tegracam_device *tc_dev, s64 val)
++{
++	struct camera_common_data *s_data = tc_dev->s_data;
++	struct imx296 *priv = (struct imx296 *)tc_dev->priv;
++	struct device *dev = tc_dev->dev;
++	const struct sensor_mode_properties *mode =
++		&s_data->sensor_props.sensor_modes[s_data->mode_prop_idx];
++	u32 frame_length;
++	u32 min_frame_length;
++	int err;
++
++	if (val <= 0)
++		return -EINVAL;
++
++	frame_length = (u32)div64_u64(
++		IMX296_INTERNAL_CLK_HZ *
++			(u64)mode->control_properties.framerate_factor,
++		(u64)val * priv->hmax);
++
++	/* The sensor needs a minimum vertical blanking on top of the active
++	 * height, so the frame can never be shorter than that. */
++	min_frame_length = s_data->fmt_height + IMX296_MIN_VBLANK;
++	if (frame_length < min_frame_length)
++		frame_length = min_frame_length;
++	else if (frame_length > IMX296_MAX_VMAX)
++		frame_length = IMX296_MAX_VMAX;
++
++	dev_dbg(dev, "%s: val: %llde-6 [fps], frame_length: %u [lines]\n",
++		__func__, val, frame_length);
++
++	err = imx296_write_mbreg(priv, IMX296_VMAX, frame_length, 3);
++	if (err)
++		return err;
++
++	priv->frame_length = frame_length;
++
++	return 0;
++}
++
++/*
++ * Exposure. Datasheet:
++ *   exposure [s] = (1H period) * (lines per frame - SHS1) + 14.26 us
++ * so the number of exposed lines is derived first and SHS1 is what remains of
++ * the frame. The limit is the CURRENT frame length, not a constant - a shorter
++ * VMAX (higher frame rate) genuinely reduces the maximum exposure.
++ */
++static int imx296_set_exposure(struct tegracam_device *tc_dev, s64 val)
++{
++	struct camera_common_data *s_data = tc_dev->s_data;
++	struct imx296 *priv = (struct imx296 *)tc_dev->priv;
++	struct device *dev = tc_dev->dev;
++	const struct sensor_mode_properties *mode =
++		&s_data->sensor_props.sensor_modes[s_data->mode_prop_idx];
++	u64 ticks;
++	u32 lines;
++	u32 shs1;
++
++	if (val < 0)
++		val = 0;
++
++	/* exposure time -> internal-clock ticks */
++	ticks = div64_u64((u64)val * IMX296_INTERNAL_CLK_HZ,
++		(u64)mode->control_properties.exposure_factor);
++
++	if (ticks > IMX296_EXP_OFFSET_TICKS)
++		ticks -= IMX296_EXP_OFFSET_TICKS;
++	else
++		ticks = 0;
++
++	lines = (u32)div64_u64(ticks, priv->hmax);
++
++	if (lines < 1)
++		lines = 1;
++	else if (lines > priv->frame_length)
++		lines = priv->frame_length;
++
++	shs1 = priv->frame_length - lines;
++
++	dev_dbg(dev, "%s: val: %lld [us], exposed: %u [lines], SHS1: %u\n",
++		__func__, val, lines, shs1);
++
++	return imx296_write_mbreg(priv, IMX296_SHS1, shs1, 3);
++}
++
++static struct tegracam_ctrl_ops imx296_ctrl_ops = {
++	.numctrls = ARRAY_SIZE(ctrl_cid_list),
++	.ctrl_cid_list = ctrl_cid_list,
++	.set_gain = imx296_set_gain,
++	.set_exposure = imx296_set_exposure,
++	.set_frame_rate = imx296_set_frame_rate,
++	.set_group_hold = imx296_set_group_hold,
++};
++
++/*
++ * Power. The J106 ties all six CSI reset pins to a single line that a gpio-hog
++ * already released high at boot, and the five IMX219s depend on it staying
++ * high. This driver therefore never requests, frees or drives a reset gpio -
++ * software standby (CTRL00) gives per-sensor control without touching it.
++ */
++static int imx296_power_on(struct camera_common_data *s_data)
++{
++	int err = 0;
++	struct camera_common_power_rail *pw = s_data->power;
++	struct camera_common_pdata *pdata = s_data->pdata;
++	struct device *dev = s_data->dev;
++
++	dev_dbg(dev, "%s: power on\n", __func__);
++
++	if (pdata && pdata->power_on) {
++		err = pdata->power_on(pw);
++		if (err)
++			dev_err(dev, "%s failed.\n", __func__);
++		else
++			pw->state = SWITCH_ON;
++		return err;
++	}
++
++	if (pw->avdd) {
++		err = regulator_enable(pw->avdd);
++		if (err)
++			goto imx296_avdd_fail;
++	}
++
++	if (pw->iovdd) {
++		err = regulator_enable(pw->iovdd);
++		if (err)
++			goto imx296_iovdd_fail;
++	}
++
++	if (pw->dvdd) {
++		err = regulator_enable(pw->dvdd);
++		if (err)
++			goto imx296_dvdd_fail;
++	}
++
++	usleep_range(1000, 1100);
++
++	pw->state = SWITCH_ON;
++
++	return 0;
++
++imx296_dvdd_fail:
++	if (pw->iovdd)
++		regulator_disable(pw->iovdd);
++
++imx296_iovdd_fail:
++	if (pw->avdd)
++		regulator_disable(pw->avdd);
++
++imx296_avdd_fail:
++	dev_err(dev, "%s failed.\n", __func__);
++
++	return -ENODEV;
++}
++
++static int imx296_power_off(struct camera_common_data *s_data)
++{
++	int err = 0;
++	struct camera_common_power_rail *pw = s_data->power;
++	struct camera_common_pdata *pdata = s_data->pdata;
++	struct device *dev = s_data->dev;
++
++	dev_dbg(dev, "%s: power off\n", __func__);
++
++	if (pdata && pdata->power_off) {
++		err = pdata->power_off(pw);
++		if (err) {
++			dev_err(dev, "%s failed.\n", __func__);
++			return err;
++		}
++		goto power_off_done;
++	}
++
++	/* Put the sensor into software standby rather than pulling the shared
++	 * reset line - see the note above. */
++	imx296_write_reg(s_data, IMX296_CTRL00, IMX296_CTRL00_STANDBY);
++	usleep_range(1000, 1100);
++
++	if (pw->dvdd)
++		regulator_disable(pw->dvdd);
++	if (pw->iovdd)
++		regulator_disable(pw->iovdd);
++	if (pw->avdd)
++		regulator_disable(pw->avdd);
++
++power_off_done:
++	pw->state = SWITCH_OFF;
++
++	return 0;
++}
++
++static int imx296_power_put(struct tegracam_device *tc_dev)
++{
++	struct camera_common_data *s_data = tc_dev->s_data;
++	struct camera_common_power_rail *pw = s_data->power;
++
++	if (unlikely(!pw))
++		return -EFAULT;
++
++	if (likely(pw->dvdd))
++		devm_regulator_put(pw->dvdd);
++
++	if (likely(pw->avdd))
++		devm_regulator_put(pw->avdd);
++
++	if (likely(pw->iovdd))
++		devm_regulator_put(pw->iovdd);
++
++	pw->dvdd = NULL;
++	pw->avdd = NULL;
++	pw->iovdd = NULL;
++
++	/* No reset gpio was ever requested - nothing to release. */
++
++	return 0;
++}
++
++static int imx296_power_get(struct tegracam_device *tc_dev)
++{
++	struct device *dev = tc_dev->dev;
++	struct camera_common_data *s_data = tc_dev->s_data;
++	struct camera_common_power_rail *pw = s_data->power;
++	struct camera_common_pdata *pdata = s_data->pdata;
++	struct clk *parent;
++	int err = 0;
++
++	if (!pdata) {
++		dev_err(dev, "pdata missing\n");
++		return -EFAULT;
++	}
++
++	/* Sensor MCLK (INCK). Optional here: the J106 module is self-clocked,
++	 * so its device tree node deliberately does not name a clock and this
++	 * driver never enables the shared extperiph1 the IMX219s use. */
++	if (pdata->mclk_name) {
++		pw->mclk = devm_clk_get(dev, pdata->mclk_name);
++		if (IS_ERR(pw->mclk)) {
++			dev_err(dev, "unable to get clock %s\n",
++				pdata->mclk_name);
++			return PTR_ERR(pw->mclk);
++		}
++
++		if (pdata->parentclk_name) {
++			parent = devm_clk_get(dev, pdata->parentclk_name);
++			if (IS_ERR(parent))
++				dev_err(dev, "unable to get parent clock %s",
++					pdata->parentclk_name);
++			else
++				clk_set_parent(pw->mclk, parent);
++		}
++	}
++
++	if (pdata->regulators.avdd)
++		err |= camera_common_regulator_get(dev,
++				&pw->avdd, pdata->regulators.avdd);
++	if (pdata->regulators.iovdd)
++		err |= camera_common_regulator_get(dev,
++				&pw->iovdd, pdata->regulators.iovdd);
++	if (pdata->regulators.dvdd)
++		err |= camera_common_regulator_get(dev,
++				&pw->dvdd, pdata->regulators.dvdd);
++	if (err) {
++		dev_err(dev, "%s: unable to get regulator(s)\n", __func__);
++		goto done;
++	}
++
++	/* Deliberately no reset gpio - the J106 shares one reset line across
++	 * all six sensors and it is already released high by a gpio-hog. */
++
++done:
++	pw->state = SWITCH_OFF;
++
++	return err;
++}
++
++static struct camera_common_pdata *imx296_parse_dt(
++	struct tegracam_device *tc_dev)
++{
++	struct device *dev = tc_dev->dev;
++	struct device_node *np = dev->of_node;
++	struct camera_common_pdata *board_priv_pdata;
++	const struct of_device_id *match;
++	struct imx296 *priv = (struct imx296 *)tegracam_get_privdata(tc_dev);
++	unsigned int i;
++	u32 inck = IMX296_DEFAULT_INCK_HZ;
++	int err = 0;
++
++	if (!np)
++		return NULL;
++
++	match = of_match_device(imx296_of_match, dev);
++	if (!match) {
++		dev_err(dev, "Failed to find matching dt id\n");
++		return NULL;
++	}
++
++	board_priv_pdata = devm_kzalloc(dev,
++		sizeof(*board_priv_pdata), GFP_KERNEL);
++	if (!board_priv_pdata)
++		return NULL;
++
++	/* Input clock. Only the three frequencies the sensor supports are
++	 * accepted; anything else is a device tree bug and is rejected rather
++	 * than silently mis-programming the PLL. */
++	if (of_property_read_u32(np, "inck-frequency", &inck))
++		dev_dbg(dev, "inck-frequency not present, assuming %u Hz\n",
++			inck);
++
++	priv->clk_params = NULL;
++	for (i = 0; i < ARRAY_SIZE(imx296_clk_params); i++) {
++		if (imx296_clk_params[i].freq == inck) {
++			priv->clk_params = &imx296_clk_params[i];
++			break;
++		}
++	}
++	if (!priv->clk_params) {
++		dev_err(dev,
++			"unsupported inck-frequency %u Hz (expected 37125000, 54000000 or 74250000)\n",
++			inck);
++		goto error;
++	}
++	dev_dbg(dev, "INCK %u Hz\n", inck);
++
++	/* No reset-gpios lookup on purpose - see imx296_power_get(). */
++
++	err = of_property_read_string(np, "mclk", &board_priv_pdata->mclk_name);
++	if (err)
++		dev_dbg(dev, "mclk name not present, "
++			"assume sensor driven externally\n");
++
++	err = of_property_read_string(np, "avdd-reg",
++		&board_priv_pdata->regulators.avdd);
++	err |= of_property_read_string(np, "iovdd-reg",
++		&board_priv_pdata->regulators.iovdd);
++	err |= of_property_read_string(np, "dvdd-reg",
++		&board_priv_pdata->regulators.dvdd);
++	if (err)
++		dev_dbg(dev, "avdd, iovdd and/or dvdd reglrs. not present, "
++			"assume sensor powered independently\n");
++
++	board_priv_pdata->has_eeprom =
++		of_property_read_bool(np, "has-eeprom");
++
++	return board_priv_pdata;
++
++error:
++	devm_kfree(dev, board_priv_pdata);
++
++	return NULL;
++}
++
++static int imx296_set_mode(struct tegracam_device *tc_dev)
++{
++	struct imx296 *priv = (struct imx296 *)tegracam_get_privdata(tc_dev);
++	struct camera_common_data *s_data = tc_dev->s_data;
++	unsigned int i;
++	int err;
++
++	err = imx296_write_table(priv, mode_table[IMX296_MODE_COMMON]);
++	if (err)
++		return err;
++
++	err = imx296_write_table(priv, mode_table[s_data->mode]);
++	if (err)
++		return err;
++
++	/* INCK-dependent PLL configuration. */
++	for (i = 0; i < ARRAY_SIZE(priv->clk_params->incksel); i++) {
++		err = imx296_write_reg(s_data, IMX296_INCKSEL(i),
++			priv->clk_params->incksel[i]);
++		if (err)
++			return err;
++	}
++	err = imx296_write_reg(s_data, IMX296_CTRL418C,
++		priv->clk_params->ctrl418c);
++	if (err)
++		return err;
++
++	/* Line and frame length. */
++	priv->hmax = IMX296_HMAX_DEFAULT;
++	err = imx296_write_mbreg(priv, IMX296_HMAX, priv->hmax, 2);
++	if (err)
++		return err;
++
++	priv->frame_length = s_data->fmt_height + IMX296_MIN_VBLANK;
++	err = imx296_write_mbreg(priv, IMX296_VMAX, priv->frame_length, 3);
++	if (err)
++		return err;
++
++	return 0;
++}
++
++static int imx296_start_streaming(struct tegracam_device *tc_dev)
++{
++	struct imx296 *priv = (struct imx296 *)tegracam_get_privdata(tc_dev);
++
++	return imx296_write_table(priv, mode_table[IMX296_START_STREAM]);
++}
++
++static int imx296_stop_streaming(struct tegracam_device *tc_dev)
++{
++	struct imx296 *priv = (struct imx296 *)tegracam_get_privdata(tc_dev);
++	int err;
++
++	err = imx296_write_table(priv, mode_table[IMX296_STOP_STREAM]);
++
++	usleep_range(50000, 51000);
++
++	return err;
++}
++
++static struct camera_common_sensor_ops imx296_common_ops = {
++	.numfrmfmts = ARRAY_SIZE(imx296_frmfmt),
++	.frmfmt_table = imx296_frmfmt,
++	.power_on = imx296_power_on,
++	.power_off = imx296_power_off,
++	.write_reg = imx296_write_reg,
++	.read_reg = imx296_read_reg,
++	.parse_dt = imx296_parse_dt,
++	.power_get = imx296_power_get,
++	.power_put = imx296_power_put,
++	.set_mode = imx296_set_mode,
++	.start_streaming = imx296_start_streaming,
++	.stop_streaming = imx296_stop_streaming,
++};
++
++static int imx296_board_setup(struct imx296 *priv)
++{
++	struct camera_common_data *s_data = priv->s_data;
++	struct camera_common_pdata *pdata = s_data->pdata;
++	struct device *dev = s_data->dev;
++	u32 sensor_info;
++	u32 model;
++	int err = 0;
++
++	if (pdata->mclk_name) {
++		err = camera_common_mclk_enable(s_data);
++		if (err) {
++			dev_err(dev, "error turning on mclk (%d)\n", err);
++			goto done;
++		}
++	}
++
++	err = imx296_power_on(s_data);
++	if (err) {
++		dev_err(dev, "error during power on sensor (%d)\n", err);
++		goto err_power_on;
++	}
++
++	/* The sensor information register cannot be read while the sensor is
++	 * in standby - it reads back as zero. Leave standby, let it settle,
++	 * then identify. */
++	err = imx296_write_reg(s_data, IMX296_CTRL00, 0);
++	if (err) {
++		dev_err(dev, "%s: failed to leave standby (%d)\n",
++			__func__, err);
++		goto err_reg_probe;
++	}
++
++	usleep_range(2000, 5000);
++
++	err = imx296_read_mbreg(priv, IMX296_SENSOR_INFO, &sensor_info, 2);
++	if (err) {
++		dev_err(dev, "%s: error during i2c read probe (%d)\n",
++			__func__, err);
++		goto err_standby;
++	}
++
++	model = (sensor_info >> 6) & 0x1ff;
++	if (model != IMX296_MODEL_ID) {
++		dev_err(dev, "%s: invalid sensor model %u (info 0x%04x)\n",
++			__func__, model, sensor_info);
++		err = -ENODEV;
++		goto err_standby;
++	}
++
++	priv->mono = !!(sensor_info & IMX296_SENSOR_INFO_MONO);
++	dev_info(dev, "detected IMX296%s (sensor info 0x%04x)\n",
++		priv->mono ? "LL (monochrome)" : "LQ (colour)", sensor_info);
++
++err_standby:
++	imx296_write_reg(s_data, IMX296_CTRL00, IMX296_CTRL00_STANDBY);
++
++err_reg_probe:
++	imx296_power_off(s_data);
++
++err_power_on:
++	if (pdata->mclk_name)
++		camera_common_mclk_disable(s_data);
++
++done:
++	return err;
++}
++
++static int imx296_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(sd);
++
++	dev_dbg(&client->dev, "%s:\n", __func__);
++
++	return 0;
++}
++
++static const struct v4l2_subdev_internal_ops imx296_subdev_internal_ops = {
++	.open = imx296_open,
++};
++
++static int imx296_probe(struct i2c_client *client,
++	const struct i2c_device_id *id)
++{
++	struct device *dev = &client->dev;
++	struct tegracam_device *tc_dev;
++	struct imx296 *priv;
++	int err;
++
++	dev_dbg(dev, "probing v4l2 sensor at addr 0x%0x\n", client->addr);
++
++	if (!IS_ENABLED(CONFIG_OF) || !client->dev.of_node)
++		return -EINVAL;
++
++	priv = devm_kzalloc(dev, sizeof(struct imx296), GFP_KERNEL);
++	if (!priv)
++		return -ENOMEM;
++
++	tc_dev = devm_kzalloc(dev, sizeof(struct tegracam_device), GFP_KERNEL);
++	if (!tc_dev)
++		return -ENOMEM;
++
++	priv->i2c_client = tc_dev->client = client;
++	tc_dev->dev = dev;
++	strncpy(tc_dev->name, "imx296", sizeof(tc_dev->name));
++	tc_dev->dev_regmap_config = &sensor_regmap_config;
++	tc_dev->sensor_ops = &imx296_common_ops;
++	tc_dev->v4l2sd_internal_ops = &imx296_subdev_internal_ops;
++	tc_dev->tcctrl_ops = &imx296_ctrl_ops;
++
++	/* parse_dt() runs inside tegracam_device_register() and needs to reach
++	 * priv to store the resolved clock parameters, so priv must be visible
++	 * before registering. Assign the field directly rather than calling
++	 * tegracam_set_privdata(), which also writes through tc_dev->s_data -
++	 * that pointer is only assigned after parse_dt() has returned. */
++	tc_dev->priv = priv;
++	priv->hmax = IMX296_HMAX_DEFAULT;
++
++	err = tegracam_device_register(tc_dev);
++	if (err) {
++		dev_err(dev, "tegra camera driver registration failed\n");
++		return err;
++	}
++	priv->tc_dev = tc_dev;
++	priv->s_data = tc_dev->s_data;
++	priv->subdev = &tc_dev->s_data->subdev;
++	tegracam_set_privdata(tc_dev, (void *)priv);
++
++	err = imx296_board_setup(priv);
++	if (err) {
++		tegracam_device_unregister(tc_dev);
++		dev_err(dev, "board setup failed\n");
++		return err;
++	}
++
++	err = tegracam_v4l2subdev_register(tc_dev, true);
++	if (err) {
++		dev_err(dev, "tegra camera subdev registration failed\n");
++		return err;
++	}
++
++	dev_dbg(dev, "detected imx296 sensor\n");
++
++	return 0;
++}
++
++static int imx296_remove(struct i2c_client *client)
++{
++	struct camera_common_data *s_data = to_camera_common_data(&client->dev);
++	struct imx296 *priv = (struct imx296 *)s_data->priv;
++
++	tegracam_v4l2subdev_unregister(priv->tc_dev);
++	tegracam_device_unregister(priv->tc_dev);
++
++	return 0;
++}
++
++static const struct i2c_device_id imx296_id[] = {
++	{ "imx296", 0 },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, imx296_id);
++
++static struct i2c_driver imx296_i2c_driver = {
++	.driver = {
++		.name = "imx296",
++		.owner = THIS_MODULE,
++		.of_match_table = of_match_ptr(imx296_of_match),
++	},
++	.probe = imx296_probe,
++	.remove = imx296_remove,
++	.id_table = imx296_id,
++};
++module_i2c_driver(imx296_i2c_driver);
++
++MODULE_DESCRIPTION("Media Controller driver for Sony IMX296");
++MODULE_AUTHOR("Tao Wang");
++MODULE_LICENSE("GPL v2");
+--- a/kernel/nvidia/drivers/media/i2c/imx296_mode_tbls.h
++++ b/kernel/nvidia/drivers/media/i2c/imx296_mode_tbls.h
+@@ -0,0 +1,139 @@
++/*
++ * imx296_mode_tbls.h - sensor mode tables for the Sony IMX296 global shutter
++ *			sensor (Auvidea J106 / Jetson TX2).
++ *
++ * Copyright (c) 2026, Tao Wang.
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef __IMX296_I2C_TABLES__
++#define __IMX296_I2C_TABLES__
++
++#include <media/camera_common.h>
++
++#define IMX296_TABLE_WAIT_MS	0
++#define IMX296_TABLE_END	1
++
++#define imx296_reg struct reg_8
++
++/* Stream control.
++ * Datasheet: CTRL00[0] = STANDBY, CTRL0A[0] = XMSTA (master start/stop).
++ * Order matters - leave standby first, let the internal PLL settle, then
++ * release XMSTA. Stopping is the exact reverse. */
++static imx296_reg imx296_start_stream[] = {
++	{0x3000, 0x00},			/* CTRL00: clear STANDBY */
++	{IMX296_TABLE_WAIT_MS, 5},
++	{0x300a, 0x00},			/* CTRL0A: release XMSTA */
++	{IMX296_TABLE_END, 0x00}
++};
++
++static imx296_reg imx296_stop_stream[] = {
++	{0x300a, 0x01},			/* CTRL0A: XMSTA (master stop) */
++	{0x3000, 0x01},			/* CTRL00: STANDBY */
++	{IMX296_TABLE_END, 0x00}
++};
++
++/* Sensor initialisation sequence.
++ *
++ * These registers are NOT described in the datasheet - they are the vendor
++ * tuning sequence, reproduced verbatim from the upstream mainline driver
++ * (drivers/media/i2c/imx296.c, imx296_init_table). Do not "clean up", reorder
++ * or tune these values: they are unpublished magic and there is no way to
++ * verify a change against a specification. */
++static imx296_reg imx296_mode_common[] = {
++	{0x3005, 0xf0},
++	{0x309e, 0x04},
++	{0x30a0, 0x04},
++	{0x30a1, 0x3c},
++	{0x30a4, 0x5f},
++	{0x30a8, 0x91},
++	{0x30ac, 0x28},
++	{0x30af, 0x09},
++	{0x30df, 0x00},
++	{0x3165, 0x00},
++	{0x3169, 0x10},
++	{0x316a, 0x02},
++	{0x31c8, 0xf3},	/* Exposure-related */
++	{0x31d0, 0xf4},	/* Exposure-related */
++	{0x321a, 0x00},
++	{0x3226, 0x02},
++	{0x3256, 0x01},
++	{0x3541, 0x72},
++	{0x3516, 0x77},
++	{0x350b, 0x7f},
++	{0x3758, 0xa3},
++	{0x3759, 0x00},
++	{0x375a, 0x85},
++	{0x375b, 0x00},
++	{0x3832, 0xf5},
++	{0x3833, 0x00},
++	{0x38a2, 0xf6},
++	{0x38a3, 0x00},
++	{0x3a00, 0x80},
++	{0x3d48, 0xa3},
++	{0x3d49, 0x00},
++	{0x3d4a, 0x85},
++	{0x3d4b, 0x00},
++	{0x400e, 0x58},
++	{0x4014, 0x1c},
++	{0x4041, 0x2a},
++	{0x40a2, 0x06},
++	{0x40c1, 0xf6},
++	{0x40c7, 0x0f},
++	{0x40c8, 0x00},
++	{0x4174, 0x00},
++	{IMX296_TABLE_END, 0x00}
++};
++
++/* All-pixel scan mode, 1456x1088 RAW10.
++ *
++ * Only the INCK-independent part lives here; HMAX/VMAX, INCKSEL[0..3] and
++ * CTRL418C depend on the board's input clock and are written by
++ * imx296_set_mode(). */
++static imx296_reg imx296_mode_1456x1088[] = {
++	{0x3300, 0x00},			/* FID0_ROI: ROI off - full pixel array */
++	{0x300d, 0x00},			/* CTRL0D: WINMODE_ALL, no binning */
++	{0x4114, 0xc5},			/* GTTABLENUM */
++	{0x3212, 0x08},			/* GAINDLY: no delay */
++	{0x3254, 0x3c},			/* BLKLEVEL (16-bit, LSB) */
++	{0x3255, 0x00},			/* BLKLEVEL MSB */
++	{IMX296_TABLE_END, 0x00}
++};
++
++enum {
++	IMX296_MODE_1456x1088_60FPS,
++	IMX296_MODE_COMMON,
++	IMX296_START_STREAM,
++	IMX296_STOP_STREAM,
++};
++
++static imx296_reg *mode_table[] = {
++	[IMX296_MODE_1456x1088_60FPS]	= imx296_mode_1456x1088,
++	[IMX296_MODE_COMMON]		= imx296_mode_common,
++	[IMX296_START_STREAM]		= imx296_start_stream,
++	[IMX296_STOP_STREAM]		= imx296_stop_stream,
++};
++
++/* Datasheet "All-pixel scan mode", AD = 10 bit: 60.3 frame/s.
++ * Derived check: HMAX 1100 / 74.25 MHz = 14.815 us per line;
++ * 1 / (VMAX 1118 * 14.815 us) = 60.38 frame/s. */
++static const int imx296_60fps[] = {
++	60,
++};
++
++static const struct camera_common_frmfmt imx296_frmfmt[] = {
++	{{1456, 1088}, imx296_60fps, 1, 0, IMX296_MODE_1456x1088_60FPS},
++};
++
++#endif /* __IMX296_I2C_TABLES__ */
+--- a/kernel/nvidia/drivers/media/i2c/Kconfig
++++ b/kernel/nvidia/drivers/media/i2c/Kconfig
+@@ -31,6 +31,15 @@
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called imx219.
+ 
++config VIDEO_IMX296
++	tristate "IMX296 camera sensor support"
++	depends on I2C && VIDEO_V4L2 && VIDEO_V4L2_SUBDEV_API
++	---help---
++	  This driver supports IMX296 global shutter camera sensor from Sony
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called imx296.
++
+ config VIDEO_IMX268
+ 	tristate "IMX268 camera sensor support"
+ 	depends on I2C && VIDEO_V4L2 && VIDEO_V4L2_SUBDEV_API
+--- a/kernel/nvidia/drivers/media/i2c/Makefile
++++ b/kernel/nvidia/drivers/media/i2c/Makefile
+@@ -7,6 +7,7 @@
+ obj-$(CONFIG_VIDEO_IMX185) += imx185_v1.o
+ obj-$(CONFIG_VIDEO_IMX477) += imx477.o
+ obj-$(CONFIG_VIDEO_IMX219) += imx219.o
++obj-$(CONFIG_VIDEO_IMX296) += imx296.o
+ obj-$(CONFIG_VIDEO_IMX268) += imx268.o
+ obj-$(CONFIG_VIDEO_IMX274) += imx274.o
+ obj-$(CONFIG_VIDEO_IMX318) += imx318.o
