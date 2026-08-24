@@ -723,8 +723,12 @@ so they ship in the flashed image.
 uname -r                                   # 4.9.337-tegra
 ls /dev/video*                             # video0..N (one per probing camera)
 dmesg | grep -E 'imx219 .*(bound|failed)'  # which of A/B/C/D/E/F enumerated
-v4l2-ctl -d /dev/video0 --set-ctrl sensor_mode=2 --set-fmt-video=width=1920,height=1080,pixelformat=RG10 \
+v4l2-ctl -d /dev/video0 --set-ctrl bypass_mode=0 --set-ctrl sensor_mode=2 \
+         --set-fmt-video=width=1920,height=1080,pixelformat=RG10 \
          --stream-mmap --stream-count=30 --stream-to=/dev/null
+# bypass_mode=0 is REQUIRED: without it every camera's raw capture hangs with 0 frames
+# (looks exactly like a dead sensor). Also stop nvargus-daemon first and confirm it
+# released the node: `systemctl stop nvargus-daemon` then `fuser /dev/videoN` = empty.
 # Argus grid (restart daemon first; retry if a source races):
 sudo systemctl restart nvargus-daemon
 ```
