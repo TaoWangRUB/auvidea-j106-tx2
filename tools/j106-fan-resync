@@ -1,0 +1,41 @@
+#!/bin/sh
+# J106 fan PWM re-sync after resume from suspend.
+#
+# Install: sudo cp tools/j106-fan-resync /usr/lib/systemd/system-sleep/
+#          sudo chmod +x /usr/lib/systemd/system-sleep/j106-fan-resync
+#
+# WHY THIS EXISTS
+# --------------------------------------------------------------------------
+# Fan SPEED on the J106 is owned in-kernel by pwm-fan driving the AON PWM
+# (pwm@c340000 = pwmchip3, in the always-on / SPE domain). When temps are
+# below the first thermal trip (51 C) the governor sets target_pwm=0 and
+# pwm-fan *disables* the PWM channel rather than actively driving 0% duty.
+#
+# At cold boot the disabled AON-PWM pad leaves the fan off. But across SC7
+# suspend/resume the AON PWM controller state is lost and NOT restored to that
+# disabled-zero state on resume -> the pad comes back driving the fan at full.
+# Because the governor still computes target_pwm=0 (temps are low), pwm-fan
+# sees target == cur == 0 and never re-issues pwm_config/pwm_enable, so the
+# hardware is never re-synced and the fan runs at full RPM indefinitely (until
+# a real thermal trip > 51 C finally forces a reprogram).
+#
+# Symptom: after resume, `cat /sys/devices/pwm-fan/cur_pwm` = 0 but the fan
+# screams; tach reads ~5800 rpm.
+#
+# FIX: on every resume, force pwm-fan to actually reprogram the PWM once -
+# briefly drive a nonzero duty (real pwm_enable+config) then back to 0 (real
+# 0% program), which re-syncs hardware to the governor. Then hand speed back
+# to the governor (temp_control=1). The AUD_RST enable gate is a separate,
+# always-on line (j106-fan-enable.service) and is NOT involved here.
+
+[ "$1" = post ] || exit 0
+
+F=/sys/devices/pwm-fan
+[ -d "$F" ] || exit 0
+
+echo 0   > "$F/temp_control"   # take the thermal governor off target_pwm
+echo 160 > "$F/target_pwm"     # forces a real pwm_enable + config (output on)
+sleep 1
+echo 0   > "$F/target_pwm"     # actively program 0% duty == a true "off"
+echo 1   > "$F/temp_control"   # hand fan-speed control back to the governor
+exit 0
