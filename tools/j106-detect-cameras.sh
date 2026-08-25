@@ -6,7 +6,11 @@
 # three camera i2c buses and tells you which pre-built DTB / extlinux LABEL matches
 # the hardware actually fitted.
 #
-# Run on the board:  ./j106-detect-cameras.sh
+#   >>> RUN THIS ON THE BOARD. <<<   (the opposite of tools/j106-camera-config.py,
+#   which runs on the x86-64 build host and cross-builds the DTB)
+#
+#   on the board:      ./j106-detect-cameras.sh
+#   from the host:     ./j106-camera-config.py --detect     # ships it there for you
 #
 # Address map (the carrier's shifter XORs address bit 1, so the south sensor of each
 # pair appears at native^2):

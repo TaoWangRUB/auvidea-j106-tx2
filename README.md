@@ -853,6 +853,14 @@ is **reused**, so repeating a configuration is a LABEL selection and a reboot wi
 population gets its own DTB and LABEL (`cam296-cdef`, `cam296-f`, …), so switching back is just
 re-running the command — the previous LABELs stay in `extlinux.conf` as fallbacks.
 
+**Where each script runs** — the two are opposites, and the scripts now refuse to run in the wrong
+place rather than failing obscurely:
+
+| Script | Runs on | Why |
+|---|---|---|
+| `j106-camera-config.py` | **x86‑64 build host** | cross-builds the DTB (`cpp`, `dtc`, the `j106build/` tree) and reaches the board over SSH (`--target`) |
+| `j106-detect-cameras.sh` | **the board** | probes the live i²c buses (`j106-camera-config.py --detect` ships it there for you) |
+
 Correctness check: regenerating the currently-deployed population reproduces the hand-built DTB
 **byte-for-byte**.
 
