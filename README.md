@@ -929,10 +929,31 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open / hardware‑limited
-- **IMX296 ISP colour tuning (port F)** — Argus output from the IMX296 has a strong cyan/blue cast.
+- **IMX296 ISP colour tuning** — Argus output from the IMX296 has a strong green/cyan cast.
   `/var/nvidia/nvcam/settings/camera_overrides.isp` is **Arducam IMX219 tuning** applied to every
-  sensor; there is no IMX296 tuning file. Raw V4L2 data is correct (BGGR, black level ~60), so this is
-  purely an ISP/AWB tuning gap — the same class of issue §5 *Stage 5b* fixed for IMX219.
+  sensor (the file is global, not per-sensor) and **no public IMX296 tuning file exists** — the
+  IMX296 projects on GitHub are all drivers, and NVIDIA does not document the ISP.
+  Measured on a neutral scene: **G/R = 1.97, G/B = 1.55**, i.e. almost exactly a raw Bayer sensor's
+  native channel ratios — AWB is effectively applying **unity gains**, so what you see is the
+  sensor's unbalanced raw response. That is why `wbmode` makes no difference: the AWB gray-line /
+  CCT constants in the file (`awb.GrayLineSlope`, `awb.UtoCCT`, `awb.MIREDtoU`, …) are IMX219
+  colour-response measurements and simply do not fit IMX296 data, so AWB never converges.
+  Two further IMX219-specific mismatches are visible in the same file:
+  `lensShading.imageWidth/Height = 3280x2464` (IMX219 full res, vs the IMX296's 1456×1088) and
+  `opticalBlack.manualBias* = 64` (the IMX296's BLKLEVEL is 60). **Tested:** correcting all three —
+  lens-shading geometry, black level, and disabling `awb.nightmode` — did **not** remove the cast,
+  confirming it lives in the AWB/CCM calibration. Reverted, since the file is shared with the
+  IMX219 ports.
+  **Practical workaround** until a real tuning exists: apply per-channel gains downstream —
+  **R ×1.41, G ×0.72, B ×1.11** (brightness-preserving) neutralises the measured cast. Raw V4L2
+  data is unaffected and correct (BGGR, black level ~60), so anything consuming RAW rather than
+  Argus is fine.
+- **IMX296 Argus auto-exposure is unusable unmarshalled** — left alone, AE pins **both** gain
+  (479/480 = 47.9 dB) and exposure (SHS1=0, full-frame 33 ms) to maximum and still exposes for the
+  highlights, burying the image in chroma noise. This is the AE half of the same wrong tuning.
+  Clamp it: `exposuretimerange="8000000 16500000" gainrange="1 4" ispdigitalgainrange="1 1"` gives a
+  clean, sharp image (defaults in `tools/grid-stream-host.sh`, overridable via `ARGUS_EXP` /
+  `ARGUS_GAIN` / `ARGUS_DGAIN`).
 - **IMX296 lens descriptor is a placeholder** — `module5`'s `drivernode1` still points at
   `j106_lens_imx219@J106` because the IMX296 module's optics have not been characterised. Replace with
   a dedicated `j106_lens_imx296` node once focal length / f-number are measured (affects Argus metadata
