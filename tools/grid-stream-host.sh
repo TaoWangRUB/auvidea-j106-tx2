@@ -48,13 +48,13 @@ GRID_W=1440; GRID_H=720
 # the highlights, burying the image in chroma noise - the AE half of running
 # IMX219 ISP tuning on an IMX296. Allowing a long exposure while capping gain
 # gives a clean picture. Override for darker scenes, e.g.
-#   ARGUS_AE='exposuretimerange="16000000 16500000" gainrange="1 8"'
+#   ARGUS_GAIN='1 16' ARGUS_DGAIN='1 4'   (brighter, noisier)
 # Each value is ONE argv element with a space inside it - gst-launch needs
 # exposuretimerange=<min> <max> as a single argument, so these cannot be built
 # by word-splitting a single string.
 ARGUS_EXP=${ARGUS_EXP:-"8000000 16500000"}
-ARGUS_GAIN=${ARGUS_GAIN:-"1 4"}
-ARGUS_DGAIN=${ARGUS_DGAIN:-"1 1"}
+ARGUS_GAIN=${ARGUS_GAIN:-"1 8"}
+ARGUS_DGAIN=${ARGUS_DGAIN:-"1 2"}
 ARGUS_AE_ARR=( "exposuretimerange=$ARGUS_EXP" "gainrange=$ARGUS_GAIN" "ispdigitalgainrange=$ARGUS_DGAIN" )
 CELL_PORT=(A B C D E F)
 
