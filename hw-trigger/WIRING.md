@@ -243,13 +243,36 @@ the pin voltage instead. With a channel asserted, `PE9`→`GND` should sit near 
 little; the current is then `(3.3 − 1.25 − V_pin_drop)/200`. Simpler: confirm the module responds,
 and calibrate timing with `skew`.
 
+### 4.1a Where the M110's power rails are
+
+Relevant if you drive the LEDs from the carrier instead of from the MCU pins.
+
+| Connector | Pin | Rail | Notes |
+|---|---|---|---|
+| `J23` power out | 1 | **3.3 V SATA** | on-board **3.3 V / 3 A** converter — the best 3.3 V tap |
+| `J23` | 2 | 3.3 V | shared carrier rail passed through from the J106 |
+| `J23` | 3 | 1.8 V | max 50 mA; too low for the LEDs (`(1.8−1.25)/200` = 2.75 mA) |
+| `J23` | 4 | GND | |
+| `J22` UART2 | 1 | **5 V** | "same as USB 2.0 (J17)" — the tidiest 5 V tap, and the same connector carries the optional serial link |
+| `J29` buttons, SPI/GPIO hdr | 1 | 5 V | "no current limiter, 1 A max" |
+
+**There is no 5 V on `J23`.** Four LEDs draw 41 mA total, which none of these rails notice.
+
+Paralleling all four anodes onto one rail is safe **because each module has its own `R4`** — LEDs
+sharing a single resistor would current-hog, but these do not share one.
+
+Note that at 3.3 V an external rail gains nothing over driving the STM32 pins directly: the current
+is `(3.3 − 1.25)/200` = 10.3 mA either way, R4 sets it, and a rail needs a switching element added
+back (a rail wired straight to `Trig+` holds every trigger permanently asserted). It only pays at
+5 V — see below.
+
 ### 4.1b Optional — 5 V drive for a faster optocoupler
 
 The TLP281's switching speed improves substantially with forward current. If `skew` calibration
 shows the lag is hurting short exposures, drive the LEDs from 5 V instead:
 
 ```
-    +5V (WeAct P2-42, or M110 J22 pin 1)
+    +5V (WeAct P2-42, or M110 J22 pin 1 - NOT J23, which has no 5V)
      |
      +----+----+----+----+          If = (5 - 1.25 - 0.2) / 200
      |    |    |    |                  = 17.8 mA   (near the manual's
@@ -270,8 +293,14 @@ transistor switches all four LEDs together, so **all four cameras share one expo
 the per-channel `exp <ch>` capability. Add a 10 kΩ base→emitter resistor to hold the transistor off
 while the GPIO floats during reset.
 
-Four transistors (one per channel) would give both faster switching *and* per-camera exposure, at
-the cost of four more parts.
+Four transistors (one per channel) would give both faster switching *and* per-camera exposure. A
+single **ULN2003** does the same in one package — seven channels, inputs that take 3.3 V logic
+directly, no base resistors — at `(5 − 1.25 − 1.0)/200` = 13.8 mA after its Darlington drop.
+
+**Grounds:** with the rail coming from the carrier, the MCU's ground must tie to the carrier ground
+for the base/input current to return. Already true if the WeAct is powered from `J22` 5 V or a TX2
+USB port. This gives up isolation only on the *drive* side; the barrier protecting the sensor is
+inside the optocoupler and is untouched.
 
 ### 4.2 Serial control link — MCU ↔ TX2 (optional, 3 nets)
 
