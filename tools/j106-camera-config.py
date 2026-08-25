@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """j106-camera-config.py — one command to put a given camera population on the board.
 
+  >>> RUN THIS ON THE x86-64 BUILD HOST (this repo's machine), NOT ON THE TX2. <<<
+
+  It cross-builds the DTB here and reaches the board over SSH (--target, default
+  nvidia@10.42.0.157) to deploy, reboot and verify. It needs cpp, dtc and the
+  j106build/ tree (stock-c03.dts + the kernel include tree), none of which exist
+  on the board. Contrast with tools/j106-detect-cameras.sh, which is the opposite:
+  that one runs ON the board. This script's --detect ships it there for you.
+
 Tegra binds sensors from a static device tree, so each CSI port's sensor family is
 fixed by the DTB (see README §6.7). This wraps the whole procedure: describe the
 population you want, and it generates the dtsi, builds the DTB, deploys it with its
@@ -161,6 +169,27 @@ def build_dtb(dtsi_text, tag):
     return dtb
 
 
+def check_host():
+    """Refuse to run on the target board, and explain why."""
+    if os.path.exists("/proc/device-tree/compatible"):
+        compat = open("/proc/device-tree/compatible", "rb").read().decode("ascii", "ignore")
+        if "tegra" in compat:
+            raise SystemExit(
+                "This script runs on the x86-64 BUILD HOST, not on the TX2.\n"
+                "It cross-builds the DTB and reaches the board over SSH.\n"
+                "On the board you want tools/j106-detect-cameras.sh instead.")
+    missing = [t for t in ("cpp", "dtc") if not sh(["which", t]).stdout.strip()]
+    if missing:
+        raise SystemExit("missing build tool(s): %s" % ", ".join(missing))
+    for need in (os.path.join(BUILD, "stock-c03.dts"),
+                 os.path.join(KSRC, "kernel", "kernel-4.9", "include")):
+        if not os.path.exists(need):
+            raise SystemExit(
+                "missing %s\n"
+                "This needs the j106build/ tree (see README \u00a76.1). It is git-ignored and\n"
+                "built locally, so a fresh clone must create it before using this script." % need)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Configure the J106 camera population end to end.")
     ap.add_argument("--imx296", default="", help="comma/space separated ports that carry IMX296 (rest default to IMX219)")
@@ -172,6 +201,9 @@ def main():
     ap.add_argument("--force-build", action="store_true", help="rebuild even if the DTB exists")
     ap.add_argument("--detect", action="store_true", help="just report what is fitted and exit")
     a = ap.parse_args()
+
+    if not a.detect:
+        check_host()
 
     if a.detect:
         r = sh(["ssh", "-o", "ConnectTimeout=8", a.target, "bash -s"],
