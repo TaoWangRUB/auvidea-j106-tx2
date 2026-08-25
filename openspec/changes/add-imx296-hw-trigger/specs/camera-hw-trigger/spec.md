@@ -10,14 +10,15 @@ electrical and control contract that makes connecting that trigger safe and reve
 
 A trigger source outside the Tegra SHALL generate the frame trigger from a hardware timer, so that
 edge placement does not depend on operating-system scheduling. The waveform SHALL match what the
-sensor's Fast Trigger mode consumes: idle high, one active-low pulse per frame, where the low
-duration sets the exposure.
+sensor's Fast Trigger mode consumes: one asserted pulse per frame, whose duration sets the exposure.
+The requirement is expressed in terms of assertion rather than voltage level, because the transport
+between source and sensor may invert or isolate the signal.
 
 #### Scenario: Waveform shape
 
 - **WHEN** the trigger source is running
-- **THEN** the trigger net SHALL idle **high**, SHALL be driven **low** exactly once per frame
-  period, and the low duration SHALL be the commanded exposure
+- **THEN** the trigger SHALL be asserted exactly once per frame period, SHALL be unasserted for the
+  remainder, and the asserted duration SHALL be the commanded exposure
 
 #### Scenario: Timing comes from hardware, not software
 
@@ -28,8 +29,8 @@ duration sets the exposure.
 #### Scenario: Trigger stops cleanly
 
 - **WHEN** the trigger source is commanded to stop
-- **THEN** the trigger net SHALL be left in its idle-high state, not mid-pulse, so no sensor is
-  left waiting inside an exposure
+- **THEN** the trigger SHALL be left **unasserted**, not mid-pulse, so no sensor is left waiting
+  inside an exposure
 
 ### Requirement: Trigger rate and exposure stay inside the sensor's limits
 
@@ -46,8 +47,8 @@ derived from the sensor's own timing model rather than assumed.
 #### Scenario: Exposure accounts for the sensor's fixed offset
 
 - **WHEN** an exposure time is requested
-- **THEN** the emitted low pulse SHALL be shortened by the sensor's fixed exposure offset so that
-  the exposure the sensor actually integrates equals the value requested
+- **THEN** the emitted pulse SHALL be shortened by the sensor's fixed exposure offset so that the
+  exposure the sensor actually integrates equals the value requested
 
 #### Scenario: Exposure cannot exceed the frame period
 
@@ -56,31 +57,68 @@ derived from the sensor's own timing model rather than assumed.
 - **THEN** the request SHALL be rejected with an explanatory error rather than silently clamped into
   a waveform that stalls capture
 
-### Requirement: Electrical safety gate before connection
+### Requirement: Drive matched to the module's trigger input
 
-The sensor's trigger input is a 1.8 V-domain input with an absolute maximum rating of 3.3 V. The
-documented procedure SHALL require the installer to establish which voltage domain the camera
-module's trigger pads present **before** any wire is connected, and SHALL give a level-translation
-path for the case where they are the raw sensor domain.
+The camera module's trigger input SHALL be characterised by measurement before any connection is
+made, and the drive circuit SHALL match what that measurement shows rather than what the pad
+labelling implies.
 
-#### Scenario: Domain is measured first
+#### Scenario: Input type is established by measurement
 
 - **WHEN** an installer follows the wiring procedure
-- **THEN** the procedure SHALL require a measurement identifying the trigger pad's voltage domain
-  and ground reference, and SHALL state that a 3.3 V drive into a raw 1.8 V input is outside the
-  sensor's absolute maximum rating
+- **THEN** the procedure SHALL require measurements that establish whether the trigger pads are a
+  voltage input referenced to module ground or a galvanically isolated current input, and SHALL
+  record the result
 
-#### Scenario: Level translation is specified for the 1.8 V case
+#### Scenario: Isolated current input is driven with current
 
-- **WHEN** the measurement shows the trigger pad is a raw 1.8 V sensor input
-- **THEN** the procedure SHALL specify a level-translation network, with values, that lands inside
-  the sensor's input-high and input-low thresholds
+- **WHEN** the trigger pads are an optocoupler LED isolated from module ground
+- **THEN** the drive SHALL supply a bounded forward current through a series resistor, SHALL NOT
+  connect to the camera's ground, and the per-pin current SHALL stay within the driving device's
+  rated limit
+
+#### Scenario: Ground-referenced input stays inside the sensor's ratings
+
+- **WHEN** the trigger pad is instead a voltage input in the sensor's own 1.8 V domain
+- **THEN** the procedure SHALL specify level translation landing inside the sensor's input-high and
+  input-low thresholds, because that pin's absolute maximum rating is below a 3.3 V drive
+
+#### Scenario: Reversed connection is recoverable, not destructive
+
+- **WHEN** the trigger connection is made with the wrong polarity
+- **THEN** the result SHALL be an absence of triggering rather than damage, and the procedure SHALL
+  say so, so an installer can resolve polarity empirically
 
 #### Scenario: Idle state is safe when the trigger source is absent
 
 - **WHEN** the trigger source is unpowered, in reset, or disconnected
-- **THEN** the documented wiring SHALL leave the sensors' trigger input in a state that does not
-  hold them inside an exposure, or SHALL state explicitly what recovery the host must perform
+- **THEN** the trigger SHALL come to rest in its unasserted state, so no sensor is left held inside
+  an exposure
+
+### Requirement: Pulse sense and transport delay are correctable at runtime
+
+Where the trigger passes through an isolating or inverting stage, neither the sense of the pulse nor
+its transport delay can be determined by inspection from the driving side. Both SHALL therefore be
+adjustable at runtime, without rebuilding or reflashing the trigger source.
+
+#### Scenario: Pulse sense can be inverted
+
+- **WHEN** driving the interface in one sense produces no frames
+- **THEN** the opposite sense SHALL be selectable at runtime, and the active setting SHALL be
+  reported
+
+#### Scenario: Transport delay is compensated
+
+- **WHEN** the interface's asserting and releasing delays differ, so the exposure the sensor
+  integrates differs from the exposure requested
+- **THEN** that difference SHALL be settable at runtime and SHALL be removed from the emitted pulse
+  alongside the sensor's own fixed exposure offset
+
+#### Scenario: Transport delay does not disturb synchronisation
+
+- **WHEN** every camera is driven through the same kind of interface from one timer
+- **THEN** the delay SHALL affect only the absolute exposure, not the relative timing between
+  cameras, and the documentation SHALL state this so the two are not confused
 
 ### Requirement: Sensor enters and leaves trigger mode safely
 

@@ -17,21 +17,23 @@ brightness. A WeAct MiniSTM32H7 already on hand generates the same pulse from a 
 
 ## What Changes
 
-- Add an **external hardware trigger path**: a WeAct MiniSTM32H7xx (STM32H743) generates the
-  `XTRIG` waveform on `TIM1_CH1` / `PE9`, fanned out over **one shared net** to all four camera
-  modules' `XTR+` pads, with a common ground return on `XTR−`.
-- Add **firmware** (`hw-trigger/firmware/`): bare-metal STM32H7 trigger generator — inverted-PWM
-  `TIM1_CH1`, auto-prescaler, frame-rate and exposure clamps derived from the datasheet, and a
-  line-based serial command interface on `USART1`.
-- Add a **wiring document** with the pin-level hardware diagram, the level-domain measurement gate
-  (`XTRIG` is a **1.8 V** input with a **3.3 V absolute maximum** — it must not be driven blind from
-  3.3 V), and the bring-up/verification procedure. No adapter PCB.
+- Add an **external hardware trigger path**: a WeAct MiniSTM32H7xx (STM32H743) drives the four
+  camera modules' trigger inputs from `TIM1_CH1..CH4` (`PE9/PE11/PE13/PE14`), one channel per
+  camera on a single shared counter. The modules' `XTR+`/`XTR−` pads turned out on measurement to
+  be an **optocoupler LED isolated from module ground**, so each channel supplies ~10 mA through a
+  series resistor and no ground is shared with the cameras.
+- Add **firmware** (`hw-trigger/firmware/`): bare-metal STM32H7 trigger generator — four PWM
+  channels on one counter, auto-prescaler, frame-rate and exposure limits derived from the
+  datasheet, runtime `pol`/`skew` corrections for the optocoupler, and a line-based serial command
+  interface on `USART1`.
+- Add a **wiring document** with the pin-level hardware diagram, the measurements that identified
+  the input as isolated, resistor sizing, and the bring-up/verification procedure. No adapter PCB.
 - Add **driver patch `0003`**: put the IMX296 into Fast Trigger mode (`TRIGEN`, `LOWLAGTRG`,
   `SYNCSEL` = Hi-Z) via the datasheet-mandated standby transition, selected at runtime by a module
   parameter so no DTB rebuild or reflash is needed.
-- **BREAKING (in trigger mode only)**: exposure stops being a per-camera sensor register and becomes
-  the shared trigger pulse width. The driver's exposure control becomes advisory, and the four
-  cameras necessarily share one exposure. Free-running mode is unchanged and remains the default.
+- **BREAKING (in trigger mode only)**: exposure stops being a sensor register and becomes the
+  trigger pulse width, so the driver's exposure control becomes advisory and Argus cannot drive it.
+  Free-running mode is unchanged and remains the default.
 - Add **host tools**: `j106-trigctl.py` (drive the trigger generator) and `j106-sync-check.py`
   (measure inter-camera frame skew from V4L2 buffer timestamps — the acceptance test).
 
@@ -39,8 +41,8 @@ brightness. A WeAct MiniSTM32H7 already on hand generates the same pulse from a 
 
 ### New Capabilities
 - `camera-hw-trigger`: externally generated, hardware-timed frame trigger shared by every
-  IMX296 on the rig — waveform contract, electrical safety gate, sensor mode entry/exit, runtime
-  control, and the measurable synchronisation guarantee.
+  IMX296 on the rig — waveform contract, matching the drive to the module's actual input type,
+  sensor mode entry/exit, runtime control, and the measurable synchronisation guarantee.
 
 ### Modified Capabilities
 - `imx296-camera`: the "Exposure and gain control" requirement changes — when the sensor is in
@@ -57,6 +59,5 @@ brightness. A WeAct MiniSTM32H7 already on hand generates the same pulse from a 
 - **Modified**: `patches/0002-imx296-tegracam-j106.patch` stays as-is; `0003` applies on top.
 - **Modified**: `README.md` (new stage section + status), `CLAUDE.md` (repo layout).
 - **Unchanged**: device tree. This change touches no `.dtsi`, so the deployed DTB is unaffected.
-- **Hardware**: 2 signal wires minimum (XTRIG + GND) plus, if the measurement gate says the pads are
-  a raw 1.8 V domain, two resistors for a divider. Optionally 3 wires for the serial link to the
-  M110 `J22` header.
+- **Hardware**: 5 wires (4 LED anodes + 1 common cathode return) and 4× 220 Ω resistors. No shared
+  ground with the cameras. Optionally 3 more wires for the serial link to the M110 `J22` header.

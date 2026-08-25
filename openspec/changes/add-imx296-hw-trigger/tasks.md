@@ -19,14 +19,16 @@
       `Makefile` for `arm-none-eabi-gcc`, and a `README.md` covering build and DFU flash
 - [x] 2.2 Clock init — HSE 25 MHz direct to SYSCLK, no PLL, with an HSERDY timeout falling back to
       HSI 64 MHz; record the active source and the resulting timer clock in a runtime variable
-- [x] 2.3 `TIM1_CH1` on `PE9`: inverted PWM (idle high, active-low pulse), auto-prescaler
-      (`div = ceil(period_ticks / 65536)`), start/stop that parks the pin high
+- [x] 2.3 `TIM1_CH1..CH4` on `PE9/PE11/PE13/PE14`, one counter: PWM with runtime-selectable
+      polarity, auto-prescaler (`div = ceil(period_ticks / 65536)`), start/stop that parks every
+      channel unasserted, pull-downs so an unpowered board leaves the optos dark
 - [x] 2.4 Datasheet-derived limits: reject periods shorter than `tTGPD` (1126 H = 16.6815 ms),
       subtract `tOFFSET` (14.26 µs) from the requested exposure, reject exposures that leave no
       readout margin — all computed from constants, not hard-coded tick counts
-- [x] 2.5 `USART1` (`PA9`/`PA10`, 115200 8N1) line-based command interface: `fps`, `exp`, `start`,
-      `stop`, `status`, `burst`, `help`; `status` reports clock source, timer clock, period, pulse
-      width, running state and pulse count
+- [x] 2.5 `USART1` (`PA9`/`PA10`, 115200 8N1) line-based command interface: `fps`, `period`, `exp`
+      (all or per-channel), `pol`, `skew`, `start`, `stop`, `burst`, `status`, `help`; `status`
+      reports clock source, timer clock, period, polarity, skew, per-channel pulse widths and CCRs,
+      running state and pulse count
 - [x] 2.6 Boot defaults so the rig triggers with no host attached; heartbeat/activity on the `PE3`
       LED
 - [x] 2.7 Build it — `make` must produce a `.bin`/`.elf` with `arm-none-eabi-gcc` and report size
@@ -68,9 +70,13 @@
 
 ## 6. Bring-up and verification (BLOCKED — requires the XTRIG wiring)
 
-- [ ] 6.1 Identify the camera pads by measurement and record the result in `WIRING.md`
-- [ ] 6.2 Wire `XTRIG` + `GND` (plus the divider if the measurement calls for it); confirm the
-      waveform at the camera end before enabling trigger mode
+- [x] 6.1 Identify the camera pads by measurement and record the result in `WIRING.md` — **done**:
+      the trigger input is an **optocoupler LED isolated from module ground** (1.2 V forward / OL
+      reversed; both legs OL to a ground verified at 3.3 V powered, 1.9 kΩ unpowered). The
+      level-translation gate is obsolete; the circuit was redesigned around current drive
+- [ ] 6.1b Read the optocoupler part number off a module if legible (sets the usable exposure floor)
+- [ ] 6.2 Wire 4× 220 Ω + common cathode return; confirm ~2.1 V across a resistor while triggering
+- [ ] 6.2b Determine working polarity (`pol 0`/`1`) and calibrate `skew`
 - [x] 6.3 Capture a free-running baseline with `j106-sync-check.py` — **done ahead of the wiring**: worst skew 2.43 ms, drift 8.33 µs/s over 20 s, phase re-randomised per stream start
 - [ ] 6.4 Set `trigger_mode=1`, start the trigger, and confirm all four cameras deliver frames
 - [ ] 6.5 Re-run `j106-sync-check.py` and record the triggered skew against the baseline
@@ -82,3 +88,15 @@
       the limitations (shared exposure, Argus, raw V4L2 only)
 - [x] 7.2 Update README §7 status and the `CLAUDE.md` repo-layout table with `hw-trigger/`
 - [x] 7.3 Update the memory notes for the 4×IMX296 population and the trigger design
+
+## 8. Redesign after the pad measurement (opto-isolated input)
+
+- [x] 8.1 Rewrite `WIRING.md` §2–§5, §7–§9 around current drive: 4 channels, 220 Ω sizing, no
+      shared ground, revised bring-up order
+- [x] 8.2 Firmware: 4 channels on one counter, per-channel exposure, runtime `pol` and `skew`
+- [x] 8.3 Spec: replace the level-translation requirement with "drive matched to the module's
+      actual input type", and add "pulse sense and transport delay are correctable at runtime";
+      make the waveform requirement transport-agnostic (assertion, not voltage level)
+- [x] 8.4 Design: new D9 (the measurement and what it changed), D10 (runtime `pol`/`skew`), and
+      D6 revised from one channel to four
+- [x] 8.5 Update proposal, README Stage 8 + status, firmware README, `tools/README.md`, `j106-trigctl.py`

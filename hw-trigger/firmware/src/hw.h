@@ -58,21 +58,27 @@
 #define TIM1_SR         REG32(TIM1_BASE + 0x10)
 #define TIM1_EGR        REG32(TIM1_BASE + 0x14)
 #define TIM1_CCMR1      REG32(TIM1_BASE + 0x18)
+#define TIM1_CCMR2      REG32(TIM1_BASE + 0x1C)
 #define TIM1_CCER       REG32(TIM1_BASE + 0x20)
 #define TIM1_CNT        REG32(TIM1_BASE + 0x24)
 #define TIM1_PSC        REG32(TIM1_BASE + 0x28)
 #define TIM1_ARR        REG32(TIM1_BASE + 0x2C)
 #define TIM1_CCR1       REG32(TIM1_BASE + 0x34)
+#define TIM1_CCR2       REG32(TIM1_BASE + 0x38)
+#define TIM1_CCR3       REG32(TIM1_BASE + 0x3C)
+#define TIM1_CCR4       REG32(TIM1_BASE + 0x40)
 #define TIM1_BDTR       REG32(TIM1_BASE + 0x44)
 
 #define TIM_SR_UIF      (1UL << 0)
 #define TIM_CR1_CEN     (1UL << 0)
 #define TIM_CR1_ARPE    (1UL << 7)
 #define TIM_EGR_UG      (1UL << 0)
-#define TIM_CCMR1_OC1M_PWM1 (6UL << 4)  /* PWM mode 1 */
-#define TIM_CCMR1_OC1PE (1UL << 3)      /* CCR1 preload */
-#define TIM_CCER_CC1E   (1UL << 0)
-#define TIM_CCER_CC1P   (1UL << 1)      /* active low */
+/* Both CCMRx registers lay their two channels out identically: the low half
+ * is the even channel, the high half the odd one, 8 bits apart. */
+#define TIM_CCMR_LO_PWM1 ((6UL << 4) | (1UL << 3))   /* OCxM=PWM1, OCxPE */
+#define TIM_CCMR_HI_PWM1 ((6UL << 12) | (1UL << 11))
+#define TIM_CCER_CCxE(n) (1UL << (4 * (n)))          /* n = 0..3 */
+#define TIM_CCER_CCxP(n) (1UL << (4 * (n) + 1))
 #define TIM_BDTR_MOE    (1UL << 15)     /* advanced timers need this */
 
 /* ---- USART1 (APB2) ----------------------------------------------------- */

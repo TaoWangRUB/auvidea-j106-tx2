@@ -4,7 +4,7 @@ Synchronising the four IMX296 global-shutter modules (ports C–F) by driving th
 from a **WeAct MiniSTM32H7xx** hardware timer.
 
 - **Why an external MCU and not the TX2** → [§1](#1-why-the-trigger-does-not-come-from-the-tx2)
-- **⚠ Read [§3](#3-safety-gate--measure-before-you-connect-anything) before connecting anything.**
+- **The trigger input is opto-isolated** (measured) → [§3](#3-the-trigger-input-is-opto-isolated--measured). It needs **current, not voltage**, so read §3 and §4.1 before wiring.
 - Design rationale and alternatives: [`openspec/changes/add-imx296-hw-trigger/design.md`](../openspec/changes/add-imx296-hw-trigger/design.md)
 
 ---
@@ -43,19 +43,21 @@ The STM32H7's `TIM1` produces the same pulse in hardware with a ~40 ns tick and 
 flowchart LR
     subgraph MCU["WeAct MiniSTM32H7xx (STM32H743VIT6)"]
         HSE["HSE 25 MHz crystal<br/>(fallback: HSI 64 MHz)"]
-        TIM["TIM1_CH1 — inverted PWM<br/>ARR = frame period<br/>CCR1 = exposure"]
-        PE9["PE9 · header P2-32<br/>3.3 V push-pull"]
+        TIM["TIM1 — one counter<br/>ARR = frame period<br/>CCR1..4 = exposure"]
+        P1["CH1 · PE9 · P2-32"]
+        P2["CH2 · PE11 · P2-34"]
+        P3["CH3 · PE13 · P2-36"]
+        P4["CH4 · PE14 · P2-37"]
+        GND["GND · P2-43<br/>common LED cathode return"]
         UART["USART1 PA9/PA10<br/>115200 8N1 · optional"]
-        HSE --> TIM --> PE9
+        HSE --> TIM --> P1 & P2 & P3 & P4
     end
 
-    GATE{"§3 level gate<br/>Case A: direct + 33R<br/>Case B: 820R / 1k0 divider"}
-
     subgraph CAMS["4x IMX296 — ports C, D, E, F"]
-        C["CSI-C · i2c 2-001a"]
-        D["CSI-D · i2c 2-0018"]
-        E["CSI-E · i2c 7-001a"]
-        F["CSI-F · i2c 7-0018"]
+        C["CSI-C · i2c 2-001a<br/>opto LED"]
+        D["CSI-D · i2c 2-0018<br/>opto LED"]
+        E["CSI-E · i2c 7-001a<br/>opto LED"]
+        F["CSI-F · i2c 7-0018<br/>opto LED"]
     end
 
     subgraph TX2["Jetson TX2 on J106 + M110"]
@@ -64,13 +66,27 @@ flowchart LR
         TOOL["j106-trigctl.py<br/>j106-sync-check.py"]
     end
 
-    PE9 -->|"XTRIG — one shared net"| GATE
-    GATE --> C & D & E & F
+    P1 -->|"220R"| C
+    P2 -->|"220R"| D
+    P3 -->|"220R"| E
+    P4 -->|"220R"| F
+    C & D & E & F -->|"LED cathode"| GND
     C & D & E & F -.->|"MIPI CSI-2, 1 lane each<br/>(existing FFC harness)"| VI
     DRV -->|"i2c — mode registers only"| C & D & E & F
     TOOL -.->|"UART, optional"| UART
     VI --> TOOL
 ```
+
+**The optocouplers keep the two domains genuinely separate:**
+
+| | carries | over |
+|---|---|---|
+| **Trigger** | when to expose, and for how long | 5 wires (4 anodes + 1 common cathode return), MCU → cameras, **galvanically isolated** |
+| **Control** | which mode the sensor is in, gain, readout | existing CSI/I²C harness, TX2 → cameras |
+
+The TX2 never touches the trigger wiring. The MCU never touches I²C, and never shares a ground with
+the cameras. Nothing about the existing camera harness, device tree or DTB changes.
+
 
 **Two domains, deliberately kept apart:**
 
@@ -88,14 +104,17 @@ camera harness, device tree or DTB changes.
         <-------------------- frame period (1/fps) -------------------->
         ______                                                    ______
 XTRIG         |__________________________________________________|
-   idle HIGH  <----------- exposure - 14.26 us ------------------>
+              <----------- exposure - 14.26 us ------------------>
               |
-              +-- exposure starts here (Fast Trigger: immediate on the falling edge)
+              +-- exposure starts here (Fast Trigger: immediate on assertion)
 ```
 
-- `t_exposure = t_XTRIG_low + 14.26 µs`  ← the sensor adds a fixed offset, so the firmware
-  **subtracts** it from what you ask for.
-- Idle state is **HIGH**. A low `XTRIG` means "exposing".
+- `t_exposure = t_pulse + 14.26 µs` ← the sensor adds a fixed offset, and the optocoupler adds its
+  own on/off asymmetry; the firmware **subtracts both** from what you ask for (`skew`, §6).
+- The diagram shows the signal *at the sensor*. What this board drives is the **LED**, and whether
+  LED-on means asserted is a module fact behind the isolation barrier — hence the firmware's `pol`
+  command. Default idle is **LED off**, so an idle or unpowered board cannot hold a sensor inside an
+  exposure.
 
 ### Datasheet limits (all-pixel 1456×1088 readout)
 
@@ -111,122 +130,103 @@ Source: [`IMX296LQR-C_Fulldatasheet_Awin.pdf`](../IMX296LQR-C_Fulldatasheet_Awin
 
 ---
 
-## 3. Safety gate — measure before you connect anything
+## 3. The trigger input is opto-isolated — MEASURED
 
-> ### ⚠ `XTRIG` is a **1.8 V** input whose **absolute maximum is 3.3 V**.
-> Driving a raw `XTRIG` pin from a 3.3 V push-pull output puts it *at* its absolute maximum rating.
-> Establish which domain the pads present **before** the first wire goes on.
+The module's `XTR+`/`XTR−` pads are **an optocoupler LED**, galvanically isolated from the module's
+own ground. Measured on the hardware, not inferred:
 
-### 3.1 What the pads are
+| Measurement | Result | Meaning |
+|---|---|---|
+| `XTR+` ↔ `XTR−`, diode mode | **1.2 V** one way, **OL** reversed | An LED junction. Too high for silicon (~0.7 V) or Schottky (~0.3 V); right for a GaAs emitter. |
+| `3V3` pad ↔ module GND, powered | **3.3 V** | The ground reference is real — this is what makes the two rows below trustworthy. |
+| `3V3` pad ↔ module GND, unpowered | **1.9 kΩ** | Probe contact is good, so an OL elsewhere means open, not a bad probe. |
+| `XTR−` ↔ GND, powered | **OL** | Floating. |
+| `XTR+` ↔ GND, powered | **OL** | Floating. |
 
-The module exposes six pads: `3V3`, `MAS`, `XVS`, `XHS`, `XTR+`, `XTR−` ([photo](images/)).
+Vendor documentation agrees: the Inno-Maker `CAM-IMX296RAW` manual calls the pads
+`XTR（Trig+）, GND(Trig-)` and says "multiple cameras can be connected to the same pulse".
 
-| Pad | Sensor pin | What it is | Do we connect it? |
-|---|---|---|---|
-| `3V3` | — | board 3.3 V rail | **No** — reference/measurement only |
-| `MAS` | `XMASTER` | master(L)/slave(H) select | **No** — must stay **low**; already is (see 3.2) |
-| `XVS` | `XVS` | vertical sync — an **output** in master mode | **No** — driver sets it Hi-Z |
-| `XHS` | `XHS` | horizontal sync — an **output** in master mode | **No** — driver sets it Hi-Z |
-| `XTR+` | `XTRIG` | trigger input | **Yes** — the one signal |
-| `XTR−` | `VSS` | trigger ground return | **Yes** |
+### What this changes — mostly for the better
 
-Vendor documentation for this pad family (Inno-Maker `CAM-IMX296RAW` manual §4) confirms
-`XTR（Trig+）, GND(Trig-)` — **single-ended, `XTR−` is ground**, not a differential pair — and that
-"multiple cameras can be connected to the same pulse".
+- **The 1.8 V level problem is gone.** `XTRIG` itself is a 1.8 V input with a 3.3 V absolute
+  maximum, but we never touch it: the opto's own output drives it, inside the module. **No level
+  translation, no divider, and no way to over-volt the sensor from out here.**
+- **No ground connection to the cameras.** The LED's cathode returns to *this board's* ground, not
+  the module's. No star grounding, no ground loops, no shared return.
+- **But it needs current, not voltage** — which is what forces the topology in §4.
 
-### 3.2 Measurements (multimeter, no scope needed)
+### Consequences to hold on to
 
-Do these on **one** module first. **The cameras do not need to be streaming** — `XTRIG` is an
-*input*, so its idle level is set by whatever pulls it on the module, which depends only on the
-rails being up, not on whether the sensor is producing frames. Powered and idle is enough.
+1. **One GPIO cannot drive four.** An opto LED wants ~10 mA; four in parallel is 40 mA from one pin,
+   over the STM32's 25 mA absolute per-pin limit. Series is worse — 4 × 1.2 V = 4.8 V of LED drop,
+   more than a 3.3 V pin can push. Hence **one channel per camera** (§4.1). They still share one
+   timer counter, so the frame start is identical by construction.
+2. **The pulse *sense* is unknown.** Whether driving the LED asserts `XTRIG` or releases it depends
+   on the module's internal wiring, which is behind the isolation barrier and cannot be probed from
+   outside. The firmware has a runtime `pol` command for this; the default is idle-LED-off, the safe
+   state.
+3. **The opto adds asymmetric delay, and pulse width is exposure.** Turn-on and turn-off delays
+   differ (µs, current- and temperature-dependent), so the sensor integrates slightly longer or
+   shorter than commanded. This is **identical on all four cameras**, so *synchronisation is
+   unaffected* — only absolute exposure. Measure once, set it with the firmware's `skew` command.
+   It also puts a floor on the shortest usable exposure: expect ~100 µs rather than the sensor's
+   own 14 µs.
+4. **LED polarity.** With the meter's red (positive) lead on `XTR−` it conducted, so `XTR−` is the
+   **anode** and `XTR+` the cathode — the opposite of what the labels suggest, so confirm before
+   soldering. Getting it backwards is **harmless**: 3.3 V reverse is inside a typical 5 V LED
+   reverse rating, so you get no frames and you swap the two wires.
 
-#### Part 1 — board UNPOWERED
-
-Resistance and continuity inject a test current, so they are only meaningful with the rails down.
-Shut the board down cleanly (`sudo poweroff`), don't just pull the plug.
-
-| # | Measure | Expected | Meaning |
-|---|---|---|---|
-| 1 | `XTR−` ↔ board GND, continuity | ~0 Ω | `XTR−` is the ground return, as the vendor doc says. **If it is not ~0 Ω, stop** — the pads may be an isolated or differential input, which this guide does not cover. |
-| 2 | `XTR+` ↔ `3V3` pad, resistance | see below | Is there a pull-up, and to which rail? |
-| 3 | `XTR+` ↔ GND, resistance | see below | |
-
-#### Part 2 — board POWERED, cameras idle (no streaming)
-
-| # | Measure | Expected | Meaning |
-|---|---|---|---|
-| 4 | `MAS` ↔ GND, DC volts | ~0 V | `XMASTER` low = **master mode**, which Fast Trigger requires. It must already be low — the cameras free-run *at all* today, which is only possible in master mode. **If it reads high, stop**: the whole approach assumes master mode. |
-| 5 | `XTR+` ↔ GND, DC volts, idle | see below | **This is the gate.** |
-
-#### Reading the result
-
-Take measurement 5 first; measurements 2–3 disambiguate it when it is unclear.
-
-| Measurement 5 | Also | Domain | Action |
-|---|---|---|---|
-| **~3.3 V** | typ. 10 k to `3V3` | pad is pulled to the board's 3.3 V rail → there is a buffer/shifter behind it | **Case A** |
-| **~1.8 V** | no path to `3V3` | pad is the raw sensor `XTRIG`, idling high on OVDD | **Case B** |
-| **~0 V** | finite R to GND only | pad is the raw `XTRIG` with a pull-down | **Case B** |
-| **drifts / won't settle** | no finite R either way | an auto-direction translator (TXB-type) with its input floating — these have weak keepers and no defined idle | **Case A**, but confirm by measuring again with `XTR+` briefly tied to `3V3` through 10 k: if it follows to 3.3 V, the pad is 3.3 V logic |
-| anything else | — | unclear | Assume **Case B** — it is the safe assumption, and it costs two resistors |
-
-### 3.3 Case A — `XTR+` tolerates 3.3 V (expected)
-
-Direct wire. One series resistor at the **MCU end** damps reflections on the fan-out stubs:
-
-```
-PE9 (P2-32) ----[ 33R ]----+----> XTR+  (CSI-C)
-                           +----> XTR+  (CSI-D)
-                           +----> XTR+  (CSI-E)
-                           +----> XTR+  (CSI-F)
-
-GND (P2-43) ---------------+----> XTR-  x4  (star from the MCU, see §5)
-```
-
-### 3.4 Case B — `XTR+` is a raw 1.8 V input
-
-One divider, shared by all four inputs (they are high-impedance CMOS loads):
-
-```
-                     820R              +----> XTR+ (CSI-C)
-PE9 (P2-32) ---+----/\/\/\----+--------+----> XTR+ (CSI-D)
-               |              |        +----> XTR+ (CSI-E)
-             [10k]          [1k0]      +----> XTR+ (CSI-F)
-               |              |
-              3V3            GND
-           (optional,      (P2-43)
-            see below)
-```
-
-- **3.3 V × 1000/(820+1000) = 1.813 V** — above VIH (1.44 V), below the 1.9 V OVDD max. Low level
-  is 0 V, below VIL (0.36 V).
-- Source impedance 820 ∥ 1000 = **451 Ω**. Against ~150 pF of stubs and wiring that is a ~150 ns
-  edge — symmetric on both edges, so it **cancels out of the pulse width** to first order and is
-  irrelevant next to a ≥50 µs exposure.
-- The optional **10 kΩ to 3V3 (P2-41)** holds `XTRIG` high while the MCU is in reset or
-  unplugged, so the sensors are never parked inside an exposure. Not strictly needed — the sensors
-  ignore `XTRIG` until the driver sets `trigger_mode=1` — but it is two pence of insurance.
-- Use **1 %** resistors. E24 alternatives: 1k0/1k2 → 1.80 V, or 470R/560R → 1.80 V (lower impedance,
-  faster edges, 3.2 mA draw).
-
----
+> **If the opto's part number is legible** on the module (a small 4-pin package near the pads),
+> record it — it fixes the expected forward current and switching times, which is what sets the
+> minimum usable exposure. An `817`-class part is slow (tens of µs); a `6N137`/`TLP2361`-class logic
+> opto is fast (~50 ns).
 
 ## 4. Wiring tables
 
-### 4.1 Trigger — MCU → 4 cameras (required, 2 nets)
+### 4.1 Trigger — MCU → 4 cameras (required)
+
+**5 wires and 4 resistors.** One TIM1 channel per camera, all four on the same counter — so the
+frame start is identical across cameras by construction, while each channel can carry its own
+exposure. No connection to camera ground anywhere.
+
+```
+                    220R            LED
+  PE9  (P2-32) ----/\/\/\----->|----+            CSI-C
+  PE11 (P2-34) ----/\/\/\----->|----+            CSI-D
+  PE13 (P2-36) ----/\/\/\----->|----+            CSI-E
+  PE14 (P2-37) ----/\/\/\----->|----+            CSI-F
+                              anode |
+                                    |
+  GND  (P2-43) ---------------------+   common cathode return
+```
 
 | From (WeAct board) | Silkscreen | Header pin | → | To | Note |
 |---|---|---|---|---|---|
-| `TIM1_CH1` | **`E9`** | P2‑32 | → | `XTR+` on **all four** modules | via §3.3 or §3.4 |
-| Ground | **`GND`** | P2‑43 | → | `XTR−` on **all four** modules | star, see §5 |
+| `TIM1_CH1` | **`E9`** | P2‑32 | → 220 Ω → | CSI‑**C** LED **anode** | |
+| `TIM1_CH2` | **`E11`** | P2‑34 | → 220 Ω → | CSI‑**D** LED anode | |
+| `TIM1_CH3` | **`E13`** | P2‑36 | → 220 Ω → | CSI‑**E** LED anode | |
+| `TIM1_CH4` | **`E14`** | P2‑37 | → 220 Ω → | CSI‑**F** LED anode | |
+| Ground | **`GND`** | P2‑43 | → | LED **cathode**, all four | tie the four cathodes together |
 
-**Finding `E9` on the board:** right-hand header, the row labelled `E8 E9` — `E9` is the outer pin
-of that pair. It is **6 rows above** the `3V3 5V` row, which is second from the bottom. The
-`GND GND` row is the bottom row.
+⚠ **Anode is the pad that conducted with the meter's red lead on it.** On the module measured here
+that was **`XTR−`**, with `XTR+` as the cathode — opposite to what the labels suggest, so check
+yours. Backwards is harmless (no frames, swap the wires), never damaging.
 
-`PE9` is free on this board: `PE10`–`PE14` are the on-board TFT-LCD, `PE0/1/4/5/6` are the DCMI
-camera connector, `PE3` is the blue LED, `PA11/PA12` are USB. (WeAct schematic
-`STM32H7xx SchDoc V12.pdf`.)
+**Resistor value.** `(3.3 V − 1.2 V) / 220 Ω = 9.5 mA` per LED, 38 mA total across four pins —
+inside the STM32's 25 mA-per-pin limit with margin. Use **220 Ω** to start.
+
+- Need a faster opto? **150 Ω** gives 14 mA, still within per-pin limits.
+- **Never go below ~140 Ω** from 3.3 V — that is the per-pin ceiling.
+- Start high and work down. Adding resistance can never overdrive the LED; if the module turns out
+  to have its own series resistor, you will simply measure less current than expected and can drop
+  to 150 Ω.
+
+**Checking the actual current once wired:** measure DC volts across one 220 Ω resistor while
+triggering. `I = V / 220`. Expect ~2.1 V for 9.5 mA; much less means the module has its own series
+resistor.
+
+**Only wiring one camera to start?** Sensible. Use `E9` (CH1) — the firmware drives all four
+channels identically until you set a per-channel exposure, so the other three simply go nowhere.
 
 ### 4.2 Serial control link — MCU ↔ TX2 (optional, 3 nets)
 
@@ -280,17 +280,19 @@ pin if it maps to a Tegra GPIO on TX2.
 
 ---
 
-## 5. Grounding and cable practice
+## 5. Cable practice
 
-- **One star point.** All four `XTR−` returns go back to the *same* WeAct `GND` pin. Do not daisy-
-  chain camera-to-camera; a shared return that passes through another module turns its ground
-  bounce into your trigger's noise margin.
-- **Twist each run.** Each `XTRIG`/`GND` pair twisted together, ideally < 30 cm.
-- **Keep it away from the CSI FFCs.** The MIPI harness is the noisiest thing on the carrier.
-- The 33 Ω (Case A) or the divider (Case B) belongs at the **MCU end**, so the fan-out stubs are
-  driven from one damped source.
+The isolation removes most of what usually makes this fiddly — there is no shared ground with the
+cameras, so no ground loops and no star-point discipline to get right.
 
----
+- **Twist each pair.** Each channel's anode wire twisted with the common cathode return, ideally
+  < 30 cm. An LED loop is low-impedance and not especially noise-sensitive, but a twisted pair also
+  stops *it* radiating into the CSI harness.
+- **Keep it away from the CSI FFCs**, which are the noisiest thing on the carrier.
+- **Resistors at the MCU end**, so the long run carries current rather than sitting between the
+  resistor and the LED.
+- **`PE11`/`PE13`/`PE14` are shared with the on-board TFT-LCD header.** Fine here — the LCD is not
+  fitted — but do not populate both.
 
 ## 6. Firmware — build and flash
 
@@ -305,36 +307,48 @@ dfu-util -a 0 -s 0x08000000:leave -D build/camtrig.bin
 No debugger needed — the STM32 ROM bootloader provides USB DFU, and `dfu-util` is already on the
 build host.
 
+Two commands exist specifically for the optocoupler, both settable at runtime over the serial link:
+
+| Command | For |
+|---|---|
+| `pol <0\|1>` | Which way round the pulse drives the LED. `1` (default) = the pulse turns the LED **on**, so idle is LED-off. Use `0` if the module asserts `XTRIG` when the LED is *off*. |
+| `skew <ns>` | The opto's turn-on/turn-off delay asymmetry, subtracted from the pulse alongside the sensor's own 14.26 µs. Measure once per module type. |
+
 ---
 
 ## 7. Bring-up order
 
-Do it in this order. Each step is reversible and each one fails loudly rather than silently.
+Each step is reversible and fails loudly rather than silently.
 
-1. **Measure** the pads (§3.2) on one module. Record the result at the bottom of this file.
-2. **Flash** the firmware (§6). With nothing else connected, `status` over serial (or the `PE3` LED
-   blinking at the frame rate) confirms the timer is running.
-3. **Scope or DMM `PE9`** before it goes anywhere near a camera. A DMM on DC will read the average:
-   at 30 fps with 5 ms exposure that is 3.3 × (1 − 0.15) ≈ 2.8 V. Wrong polarity (idle low) reads
-   ~0.5 V and means the PWM polarity is inverted — fix that before connecting.
-4. **Wire** `XTRIG` + `GND` per §3.3/§3.4, cameras still free-running (`trigger_mode=0`). Confirm
-   no regression — all four cameras must still capture exactly as before.
-5. **Baseline**: `tools/j106-sync-check.py` free-running. Expect the inter-camera spread to walk.
-6. **Enable**: `echo 1 | sudo tee /sys/module/imx296/parameters/trigger_mode`, restart capture.
-   `dmesg` must show trigger mode active on all four sensors.
-7. **Verify**: re-run `j106-sync-check.py`. Expect a small, bounded spread.
-8. **Count**: `j106-trigctl.py burst 300` and confirm each camera delivered 300 frames.
+1. **Confirm LED polarity** on each module (diode mode; anode is the pad that conducts with the red
+   lead on it) and record it in §9.
+2. **Flash** the firmware (§6). With nothing connected, the `PE3` LED blinking ~2 Hz means the timer
+   is running. `status` over serial confirms clock source, period and per-channel pulse widths.
+3. **Check a channel before it meets a camera.** A DMM on DC across `PE9`→`GND` reads the average:
+   at 30 fps / 5 ms with the default active-high polarity that is `3.3 × 0.15 ≈ 0.5 V`. Reading
+   ~2.8 V instead means the polarity is inverted — fix with `pol` before wiring.
+4. **Wire one camera first** (§4.1), cameras still free-running (`trigger_mode=0`). Measure DC volts
+   across its 220 Ω resistor while triggering: ~2.1 V ⇒ ~9.5 mA, as intended.
+5. **Enable trigger mode** and confirm that one camera still delivers frames:
+   `echo 1 | sudo tee /sys/module/imx296/parameters/trigger_mode`, then restart capture. `dmesg`
+   must show `EXTERNAL TRIGGER`.
+   - **No frames?** Try `./j106-trigctl.py raw 'pol 0'` — the module may assert on LED *off*. If it
+     still fails, swap that camera's two wires (the LED may be reversed).
+6. **Calibrate the opto delay.** With a known commanded exposure, compare image brightness against
+   the same exposure free-running, or scope the module's `XVS` pad. Set the difference with
+   `./j106-trigctl.py raw 'skew <ns>'`.
+7. **Wire the remaining three**, then re-run `j106-sync-check.py`.
+8. **Count**: `./j106-trigctl.py burst 300` and confirm each camera delivered 300 frames.
 
 **Rollback at any point:** `echo 0 > /sys/module/imx296/parameters/trigger_mode` and restart
 capture. No reboot, no reflash, no DTB change.
 
----
-
 ## 8. What this does *not* do
 
-- **All four cameras share one exposure.** One net ⇒ one pulse width ⇒ one exposure. Per-camera
-  exposure needs four nets (`TIM1_CH1..CH4`, still one counter so still perfectly phase-locked);
-  the firmware's parameter model leaves room for it.
+- **Exposure accuracy depends on the optocoupler.** Its turn-on and turn-off delays differ, so the
+  sensor integrates for slightly more or less than commanded until `skew` is calibrated. This is
+  identical on all four cameras, so it does not affect synchronisation. It also puts a floor of
+  roughly 100 µs on the shortest usable exposure, well above the sensor's own 14 µs.
 - **Argus/ISP exposure control stops working** in trigger mode — Argus cannot drive a wire it does
   not know about. Triggered operation targets raw V4L2 capture.
 - **No absolute time reference.** The trigger is a free-running crystal (±20 ppm). Frames are
@@ -345,14 +359,17 @@ capture. No reboot, no reflash, no DTB change.
 
 ## 9. Measured results
 
-Fill in during bring-up (§7).
-
 | Step | Result | Date |
 |---|---|---|
-| §3.2 measurement 1 — `XTR−` continuity to GND | _pending_ | |
-| §3.2 measurement 2 — `MAS` level | _pending_ | |
-| §3.2 measurement 3 — `XTR+` idle voltage → Case A / B | _pending_ | |
+| `XTR+` ↔ `XTR−`, diode mode | **1.2 V forward, OL reversed** → optocoupler LED | 2026‑08‑25 |
+| `3V3` ↔ module GND | **3.3 V** powered / **1.9 kΩ** unpowered → ground reference verified | 2026‑08‑25 |
+| `XTR−` ↔ GND, `XTR+` ↔ GND, powered | **both OL** → input is galvanically isolated | 2026‑08‑25 |
+| LED polarity | red lead on `XTR−` conducts ⇒ **`XTR−` = anode** (confirm per module) | 2026‑08‑25 |
 | **Free-running baseline** — worst skew **2.43 ms**, drift **8.33 µs/s** over 20 s, 4× IMX296 @ 30.01 fps | **measured** | 2026‑08‑25 |
+| Optocoupler part number | _pending_ | |
+| LED current (V across 220 Ω ÷ 220) | _pending_ | |
+| Working polarity (`pol 0` or `1`) | _pending_ | |
+| `skew` calibration | _pending_ | |
 | Triggered inter-camera spread | _pending_ | |
 | Frame count vs trigger count over 300 pulses | _pending_ | |
 
@@ -381,7 +398,7 @@ Three things to note, because they are the case for doing this work at all:
 
 1. The cameras sit up to **2.4 ms apart** — about 1/14th of a frame at 30 fps.
 2. That offset is **re-randomised on every stream start** (an earlier 200-frame run gave
-   `+2767 / +601 / +3058 µs` instead of `−1125 / −2396 / −1299`), so it cannot be calibrated
-   out once and reused.
-3. It then **drifts** at 3–8 µs/s. The crystals are only 3–8 ppm apart, which is why the
-   drift alone is a weak test over a short run — and why the check also tests the offset.
+   `+2767 / +601 / +3058 µs` instead of `−1125 / −2396 / −1299`), so it cannot be calibrated out
+   once and reused.
+3. It then **drifts** at 3–8 µs/s. The crystals are only 3–8 ppm apart, which is why drift alone is
+   a weak test over a short run — and why the check also tests the offset.

@@ -13,8 +13,11 @@ State this design has to work with:
   trigger cannot reach the sensors through the CSI harness — it must go to the breakout's own pads
   (`3V3 / MAS / XVS / XHS / XTR+ / XTR−`).
 - Trigger source hardware is fixed by the user: a WeAct MiniSTM32H7xx (STM32H743VIT6). Confirmed
-  from its V12 schematic: `PE9` is free on header **P2‑32** (`PE10`–`PE14` are the on-board
-  TFT-LCD, `PE0/1/4/5/6` are DCMI, LED is `PE3`, USB is `PA11/PA12`, HSE is a 25 MHz crystal).
+  from its V12 schematic: `TIM1_CH1..CH4` land on `PE9/PE11/PE13/PE14`, header P2‑32/34/36/37
+  (`PE0/1/4/5/6` are DCMI, `PE10/PE12/PE15` and `PE11/13/14` are the TFT-LCD header — not fitted —
+  LED is `PE3`, USB is `PA11/PA12`, HSE is a 25 MHz crystal).
+- **The camera trigger pads are an optocoupler LED, isolated from module ground** — measured, see
+  D9. This was not known when the topology was first chosen, and it changed it.
 - Deployment discipline for this repo: every kernel change ships as a numbered patch and is deployed
   behind a new `extlinux` LABEL with the previous one kept as fallback.
 
@@ -32,7 +35,7 @@ Datasheet constants this design is built on (`IMX296LQR-C_Fulldatasheet_Awin.pdf
 
 **Goals:**
 
-- One hardware-timed trigger net driving all four IMX296 so their exposures coincide.
+- One hardware-timed trigger driving all four IMX296 from a single counter, so their exposures coincide.
 - A wiring definition an installer can follow with a soldering iron and a multimeter — no PCB.
 - Runtime switching between free-running and triggered, without touching the DTB.
 - A host-side measurement that *proves* synchronisation rather than assuming it.
@@ -42,7 +45,7 @@ Datasheet constants this design is built on (`IMX296LQR-C_Fulldatasheet_Awin.pdf
 - No adapter PCB (explicitly declined; a wiring guide instead).
 - No auto-exposure loop over the trigger. Exposure is set explicitly; closing an AE loop through
   the trigger source is future work.
-- No per-camera exposure. One shared net means one exposure for all four, by construction.
+- No auto-exposure. Per-camera exposure is now *available* (D6), but nothing drives it automatically.
 - No absolute time discipline (GNSS PPS, PTP). The trigger source is a free-running crystal.
 - No Argus/ISP integration. Argus cannot control exposure through a wire it does not know about;
   triggered operation targets raw V4L2 capture.
@@ -113,16 +116,15 @@ Alternative considered: leave them driving and use one module's `XVS` as a frame
 Rejected for now — it is a bring-up convenience that adds a live hazard to the shipped
 configuration. The wiring doc notes it as an optional scope probe point instead.
 
-### D3. One shared net, therefore one shared exposure — and a module parameter, not a DT property
+### D3. A module parameter, not a DT property
 
-The user chose a single fan-out net. Because Fast Trigger makes pulse width *be* exposure, that
-decision propagates: all four cameras necessarily share one exposure, and all four must be in the
-same mode at the same time. There is no meaningful per-sensor configuration to express.
+All four sensors are triggered together and must be in the same mode at the same time, so there is
+no meaningful per-sensor *mode* to express — even though, after D6, each may carry its own exposure.
 
-So the mode selector is a **driver module parameter** (`imx296.trigger_mode`), read at
-`start_streaming`, not a per-node device-tree property:
+The mode selector is therefore a **driver module parameter** (`imx296.trigger_mode`), read at
+`set_mode`, not a per-node device-tree property:
 
-- It matches the topology — one global switch for one global net.
+- It matches the topology — one global switch for one global decision.
 - It needs **no DTB rebuild and no reflash**. Switching is `echo 1 > /sys/module/imx296/parameters/trigger_mode`
   then restarting capture, which makes the free-running/triggered A/B comparison a two-second
   operation instead of a boot cycle. That comparison *is* the acceptance test (see D7).
@@ -158,21 +160,33 @@ The firmware runs `SYSCLK` from the board's 25 MHz crystal **without** the PLL.
 Rejected: 480 MHz via PLL. Nothing here needs the speed, and it multiplies the ways first power-on
 can fail silently.
 
-### D6. `TIM1_CH1` on `PE9`, inverted PWM; auto-prescaler
+### D6. `TIM1_CH1..CH4` on `PE9/PE11/PE13/PE14`; auto-prescaler
 
-`TIM1_CH1` in PWM mode 1 with `CCER.CC1P = 1` gives idle-high, active-low — the exact `XTRIG`
-shape — with the pulse produced entirely by hardware. `ARR` sets the period, `CCR1` the exposure.
+`TIM1` in PWM mode 1 produces the pulse entirely in hardware: `ARR` sets the period, `CCRx` the
+exposure, and `CCER.CCxP` selects which way round the pin drives it.
+
+**Four channels, not one.** D3 originally chose a single shared net, on the assumption of a CMOS
+input that one pin could fan out to four. The measurement in D9 removed that assumption: the input
+is an optocoupler LED, so it takes ~10 mA of *current* each, and four in parallel is 40 mA from one
+pin — over the STM32's 25 mA per-pin limit. Series is worse still, needing 4 × 1.2 V = 4.8 V of LED
+drop from a 3.3 V pin. So it becomes one channel per camera, which costs three resistors and three
+wires and gives back per-camera exposure. All four channels share the one counter, so the frame
+start remains identical across cameras by construction — the property that actually matters.
 
 `TIM1`'s `ARR` is 16-bit, so the prescaler is chosen at runtime:
 `div = ceil(period_ticks / 65536)`, `PSC = div − 1`. This keeps the finest resolution the requested
 rate allows and extends the reachable range down past 1 fps.
 
-Rejected: `TIM2` (32-bit, no prescaler juggling). Its channels are on `PA0/PA1/PA5/PA15`; `PE9` is
-the pin that is unambiguously free on this board *and* physically adjacent to the `3V3`/`GND` pins
-on header P2, which matters when the deliverable is hand-wiring.
+Rejected: `TIM2` (32-bit, no prescaler juggling). Only `TIM1` has four channels landing on pins this
+board leaves free — `PE9/PE11/PE13/PE14`, all on header P2 near its `3V3`/`GND` pins, which matters
+when the deliverable is hand-wiring. (`PE11/PE13/PE14` are shared with the on-board TFT-LCD header,
+which is not fitted here.)
 
-Stopping cleanly (spec: "Trigger stops cleanly") is `CCR1 = 0` then disabling the timer, so the pin
-is parked high rather than frozen mid-pulse.
+Stopping cleanly (spec: "Trigger stops cleanly") is `CCRx = 0` on every channel then disabling the
+timer, so the pins park in their idle state rather than freezing mid-pulse.
+
+The GPIOs are configured **pull-down**, not pull-up: idle must mean LED-off, so that a board in
+reset or unplugged leaves the optos dark rather than holding four sensors inside an exposure.
 
 ### D7. Verification by timestamp spread across four `/dev/video*`
 
@@ -203,45 +217,64 @@ which `/dev/ttyTHS*` it maps to is not derivable from the running tree (no UART 
 `pinmux-pins`), so the wiring doc gives a loopback identification procedure and a USB-serial dongle
 as the zero-ambiguity fallback. `j106-trigctl.py` takes `--port`, so either works.
 
-### D9. Level translation is a documented gate, not an assumption
+### D9. The trigger input is an optocoupler — measured, and it changed the design
 
-`XTRIG` is a 1.8 V input rated to a 3.3 V absolute maximum. Whether the breakout's `XTR+` pad is
-that raw input or something already buffered **cannot be determined from the photograph**, and
-guessing wrong in the permissive direction risks the sensors. The design therefore makes the
-measurement a required step with two documented outcomes:
+The original plan treated `XTR+` as a voltage input and made its level domain a documented gate,
+because `XTRIG` is a 1.8 V pin with a 3.3 V absolute maximum and the pad could have been either that
+raw pin or something buffered. The measurement settled it as neither:
 
-What the vendor documentation does settle (Inno-Maker `CAM-IMX296RAW` manual, §4):
+| Measurement | Result |
+|---|---|
+| `XTR+` ↔ `XTR−`, diode mode | **1.2 V** forward one way, **OL** reversed |
+| `3V3` ↔ module GND | **3.3 V** powered, **1.9 kΩ** unpowered (so probe contact is sound) |
+| `XTR−` ↔ GND, `XTR+` ↔ GND, powered | **both OL** |
 
-- The pads are **single-ended**, not differential: "the external trigger (denoted on the board as
-  **XTR（Trig+）, GND(Trig-)**)". So `XTR−` is a ground return, and the `+`/`−` labelling does not
-  imply a differential receiver.
-- The topology chosen here is the vendor's own: "**Multiple cameras can be connected to the same
-  pulse**, allowing for an alternative way to synchronize two cameras."
-- Their reference trigger source is a **Raspberry Pi GPIO** (`gpioset gpiochip0 23=…`), which is
-  3.3 V push-pull — evidence that a breakout of this family tolerates a 3.3 V drive on `XTR`.
-- Their exposure formula is identical to the datasheet's: "the exposure time is equal to the low
-  pulse-width time plus an additional 14.26 µs … a PWM frequency of 30 Hz will lead to a framerate
-  of 30 frames per second."
+A 1.2 V junction is too high for silicon (~0.7 V) or Schottky (~0.3 V) and right for a GaAs emitter;
+both legs float against a *verified* ground. It is an **optocoupler LED**. (The first attempt read OL
+everywhere and looked like isolation immediately — but the ground reference was unproven at that
+point, and a bad ground would have produced exactly the same three readings. Verifying the ground
+first is what made the conclusion safe.)
 
-That makes the 3.3 V-tolerant outcome the *likely* one, but not the confirmed one: the module in
-this rig carries pads (`MAS`, `XVS`, `XHS`) the Inno-Maker board does not, so it is not necessarily
-the same board, and a bare `XTRIG` pin sits at its absolute maximum under a 3.3 V drive. The
-measurement stays mandatory; it is now expected to take one reading and confirm Case A.
+Three consequences:
 
-- **3.3 V-tolerant** → direct wire + 33 Ω series at the source.
-- **Raw 1.8 V** → one 820 Ω / 1.0 kΩ divider (→ 1.813 V, comfortably above the 1.44 V VIH), shared
-  by all four high-impedance inputs. Source impedance 451 Ω; against ~150 pF of stubs and wiring
-  that is a ~150 ns edge — symmetric on both edges, so it cancels out of the pulse width to first
-  order and is irrelevant beside a ≥50 µs exposure.
+1. **The level-translation gate disappears entirely.** We never touch `XTRIG`; the opto's own output
+   drives it inside the module. No divider, no translator, and no way to over-volt the sensor from
+   outside. The most dangerous part of the original design is simply gone.
+2. **No shared ground with the cameras.** The LED cathode returns to the MCU's ground. Better than
+   the star-ground scheme it replaces.
+3. **Current, not voltage** — which forces the four-channel topology in D6, since one pin cannot
+   supply four LEDs.
+
+**What the isolation hides**, and why two things must be runtime-adjustable (D10):
+
+- Whether driving the LED *asserts* `XTRIG` or releases it is on the far side of the barrier and
+  cannot be probed from here.
+- The opto's turn-on and turn-off delays differ, and since pulse width is exposure, that asymmetry
+  becomes a systematic exposure error. It is identical across cameras driven through identical
+  interfaces, so **synchronisation is unaffected** — only absolute exposure. It also raises the
+  minimum usable exposure from the sensor's 14 µs to perhaps 100 µs.
+
+### D10. Pulse sense and transport delay are runtime settings, not build-time constants
+
+`pol` inverts the drive; `skew` removes the opto's delay asymmetry from the pulse alongside the
+sensor's own `tOFFSET`. Both are serial commands.
+
+They are runtime settings because neither is knowable from the driving side, and the alternative —
+guess, reflash, guess again — turns a two-second experiment into a build cycle during exactly the
+bring-up step where iteration matters most. The default for `pol` is idle-LED-off, chosen because
+that is the state that cannot leave a sensor held inside an exposure.
 
 ## Risks / Trade-offs
 
-- **Driving 3.3 V into a raw 1.8 V `XTRIG` would exceed the sensor's absolute maximum** → the
-  measurement gate (D9) is a spec requirement, not advice; the wiring doc leads with it and states
-  the failure explicitly.
-- **`XTR+`/`XTR−` may be a differential pair rather than signal + return** → the first bring-up task
-  is a continuity/voltage identification of all six pads before anything is connected; if they turn
-  out to be differential, the single-ended plan needs a receiver and the task list says so.
+- **Exposure will not match the commanded value until `skew` is calibrated** → documented, and the
+  bring-up order calibrates it before the four-camera run. Synchronisation is unaffected either way,
+  which is the property the acceptance test measures.
+- **The opto may be a slow phototransistor type** (`817`-class, tens of µs) rather than a fast logic
+  opto → raises the minimum usable exposure. Recorded as a bring-up measurement; the part number is
+  worth reading off the module if legible.
+- **LED polarity is opposite to what the pad labels suggest** on the module measured → the wiring
+  doc says to confirm per module, and notes that backwards is harmless (3.3 V reverse is inside a
+  typical 5 V LED reverse rating), so it costs a swap, not a part.
 - **Argus exposure control silently stops working in trigger mode** → the driver logs the mode and
   the exposure ownership once per stream, and the spec requires the active mode to be discoverable.
   Triggered operation is scoped to raw V4L2.
@@ -251,9 +284,8 @@ measurement stays mandatory; it is now expected to take one reading and confirm 
   tell whether the firmware is doing what it claims.
 - **HSI fallback changes the frame rate by up to 1%** → tolerable (sync is unaffected; only absolute
   rate moves) and reported by `status` so it cannot go unnoticed.
-- **All four cameras share one exposure** → accepted consequence of the chosen topology. Moving to
-  `TIM1_CH1..CH4` on four nets restores per-camera exposure later with no change to the sensor-side
-  design; the firmware's parameter model keeps that door open.
+- **Four channels means four resistors and five wires** rather than the two originally planned →
+  unavoidable once the input turned out to be current-driven, and it buys back per-camera exposure.
 - **A trigger stall leaves the sensors waiting** → the sensors simply stop producing frames; the
   host recovers by clearing `trigger_mode` and restarting capture. Documented, not silent.
 
