@@ -35,9 +35,27 @@ export PATH=/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin
 
 HOST=${1:-10.42.0.1}
 PORT=${2:-5000}
-BITRATE=${BITRATE:-8000000}
+BITRATE=${BITRATE:-12000000}
 
-xs=(0 640 1280 0 640 1280); ys=(0 0 0 360 360 360)
+# Cells are 4:3 (480x360), matching the IMX296's 1456x1088. Using the 16:9
+# cells this script started with (640x360) stretched every IMX296 frame by 33%.
+xs=(0 480 960 0 480 960); ys=(0 0 0 360 360 360)
+CELL_W=480; CELL_H=360
+GRID_W=1440; GRID_H=720
+
+# Argus auto-exposure needs clamping on the IMX296. Left to itself it pins BOTH
+# gain (47.9 dB of a 48 dB range) and exposure to maximum and still exposes for
+# the highlights, burying the image in chroma noise - the AE half of running
+# IMX219 ISP tuning on an IMX296. Allowing a long exposure while capping gain
+# gives a clean picture. Override for darker scenes, e.g.
+#   ARGUS_AE='exposuretimerange="16000000 16500000" gainrange="1 8"'
+# Each value is ONE argv element with a space inside it - gst-launch needs
+# exposuretimerange=<min> <max> as a single argument, so these cannot be built
+# by word-splitting a single string.
+ARGUS_EXP=${ARGUS_EXP:-"8000000 16500000"}
+ARGUS_GAIN=${ARGUS_GAIN:-"1 4"}
+ARGUS_DGAIN=${ARGUS_DGAIN:-"1 1"}
+ARGUS_AE_ARR=( "exposuretimerange=$ARGUS_EXP" "gainrange=$ARGUS_GAIN" "ispdigitalgainrange=$ARGUS_DGAIN" )
 CELL_PORT=(A B C D E F)
 
 # i2c devname (last token of the v4l2 "name") -> fixed cell index
@@ -65,17 +83,18 @@ for V in $(ls -v /dev/video* 2>/dev/null); do
   SID=$((SID+1))
 done
 echo "[grid-stream-host] cameras present: ${#CELL_SID[@]} / 6"
-echo "[grid-stream-host] streaming 1920x720 H.264 to ${HOST}:${PORT}"
+echo "[grid-stream-host] streaming ${GRID_W}x${GRID_H} H.264 to ${HOST}:${PORT}"
+echo "[grid-stream-host] argus AE: exp=[$ARGUS_EXP] gain=[$ARGUS_GAIN] dgain=[$ARGUS_DGAIN]"
 
 A=( nvcompositor name=comp )
 for N in 0 1 2 3 4 5; do
-  A+=( sink_${N}::xpos=${xs[$N]} sink_${N}::ypos=${ys[$N]} sink_${N}::width=640 sink_${N}::height=360 )
+  A+=( sink_${N}::xpos=${xs[$N]} sink_${N}::ypos=${ys[$N]} sink_${N}::width=${CELL_W} sink_${N}::height=${CELL_H} )
 done
 # nvcompositor's src pad is RGBA-only, but nvv4l2h264enc needs NV12, so convert
 # between them. The queues either side of nvvidconv matter: without them the
 # pipeline either refuses to link or dies at runtime with
 # "nvbuffer_composite Failed".
-A+=( '!' 'video/x-raw(memory:NVMM),width=1920,height=720'
+A+=( '!' "video/x-raw(memory:NVMM),width=${GRID_W},height=${GRID_H}"
      '!' queue '!' nvvidconv '!' 'video/x-raw(memory:NVMM),format=NV12' '!' queue
      '!' nvv4l2h264enc insert-sps-pps=1 idrinterval=30 bitrate=$BITRATE
      '!' h264parse '!' rtph264pay config-interval=1 pt=96
@@ -84,15 +103,15 @@ A+=( '!' 'video/x-raw(memory:NVMM),width=1920,height=720'
 for N in 0 1 2 3 4 5; do
   if [ -n "${CELL_SID[$N]:-}" ]; then
     # live camera -> its own port cell, no text over the image
-    A+=( nvarguscamerasrc sensor-id=${CELL_SID[$N]}
-         '!' 'video/x-raw(memory:NVMM),width=640,height=360,framerate=30/1'
+    A+=( nvarguscamerasrc sensor-id=${CELL_SID[$N]} "${ARGUS_AE_ARR[@]}"
+         '!' "video/x-raw(memory:NVMM),width=${CELL_W},height=${CELL_H},framerate=30/1"
          '!' nvvidconv flip-method=2 '!' queue '!' comp.sink_$N )
   else
     # empty port cell -> dark placeholder labelled with the port letter
     A+=( videotestsrc is-live=true pattern=2
-         '!' 'video/x-raw,width=640,height=360,framerate=30/1'
+         '!' "video/x-raw,width=${CELL_W},height=${CELL_H},framerate=30/1"
          '!' textoverlay text="PORT ${CELL_PORT[$N]} - no camera" valignment=center halignment=center font-desc="Sans Bold 24"
-         '!' nvvidconv '!' 'video/x-raw(memory:NVMM),width=640,height=360' '!' queue '!' comp.sink_$N )
+         '!' nvvidconv '!' "video/x-raw(memory:NVMM),width=${CELL_W},height=${CELL_H}" '!' queue '!' comp.sink_$N )
   fi
 done
 
