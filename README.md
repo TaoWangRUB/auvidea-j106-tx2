@@ -976,6 +976,24 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
   removed. So expect residual vignetting and a slight warm tint; it is a large improvement, not a
   calibration. And `camera_overrides.isp` is **global — one tuning for all sensors** — so a mixed
   IMX219 + IMX296 board cannot have both correct at once.
+- **Path to a genuinely natural image (what is actually left)** — current state is a ~21 % channel
+  imbalance (slightly warm), visible vignetting, and uncorrected fisheye distortion. In priority order:
+  1. **White balance (biggest win).** The residual cast lives in the `awb` gray-line / CCT constants.
+     **Tried and does NOT work:** `ae.PerChannelGainAdjustment` (measured trim applied, image
+     unchanged — the knob appears inert in this ISP build) and raising `ae.MeanAlg.*Target` 80→110
+     (no brightening, because AE is already pinned at the clamp ceiling). The reliable route is a
+     **grey-card measurement + per-channel correction applied downstream** of Argus, or commissioning
+     a real tuning. Raw V4L2 bypasses all of this and is already correct.
+  2. **Vignetting.** The IMX296 file has lens-shading *parameters but no tables* (24 lines vs the
+     IMX219 file's 1216) — the vendor stripped IMX477 tables and never replaced them. Fixing this is
+     a straightforward **flat-field calibration through the actual fisheye lens**: shoot a uniformly
+     lit white surface, compute per-channel radial falloff, generate `lensShading.*` tables. Pi's ALSC
+     tables cannot be reused (different lens).
+  3. **Fisheye distortion.** Not an ISP job at all — needs OpenCV fisheye calibration plus a dewarp
+     (VPI/CUDA) downstream. Required for the BEV/VIO rig regardless, so the intrinsics are dual-use.
+  4. **Validation.** Everything above is subjective without a **24-patch colour target**; with one,
+     CCM and AWB can be optimised numerically instead of by eye.
+
 - **IMX296 Argus auto-exposure is unusable unmarshalled** — left alone, AE pins **both** gain
   (479/480 = 47.9 dB) and exposure (SHS1=0, full-frame 33 ms) to maximum and still exposes for the
   highlights, burying the image in chroma noise. This is the AE half of the same wrong tuning.
