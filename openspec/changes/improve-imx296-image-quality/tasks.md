@@ -21,6 +21,7 @@
 - [x] 3.3 Document **how Raspberry Pi OS handles this** (`camera_auto_detect=1`: firmware probes the CSI I²C bus and loads the matching overlay; `dtoverlay=imx296`/`imx219` to force it; libcamera then picks its tuning JSON by sensor name) and contrast it with Tegra, where selection is an `extlinux` LABEL per pre-built DTB
 - [x] 3.4 Document the **system-level settings that must change together** when swapping sensor family: DTB/LABEL, `ISP_FILE` tuning, AE clamp, and the fact that `/dev/videoN` indices shift
 - [x] 3.5 Provide a helper that **probes the I²C buses and reports which sensor family is populated per port**, so the correct LABEL can be chosen without guesswork
+- [x] 3.6 Wrap the whole swap procedure in one command (`j106-camera-config.py`): describe the population → generate dtsi, build DTB, deploy under its own LABEL, install the matching ISP tuning, reboot, verify; reuse an already-built DTB. Verified to reproduce the deployed DTB byte-for-byte
 
 ## 4. Vignetting — lens shading calibration
 

@@ -836,6 +836,30 @@ port C  i2c-2   imx296 (bound)       port F  i2c-7   imx296 (bound)
 summary: 0 x imx219, 4 x imx296   |  CSI lanes needed: 4
 ```
 
+#### One command for the whole thing
+
+[`tools/j106-camera-config.py`](tools/j106-camera-config.py) wraps everything below — describe the
+population and it generates the dtsi, builds the DTB, deploys it under its own `extlinux` LABEL,
+installs the matching ISP tuning, reboots and verifies:
+
+```bash
+./tools/j106-camera-config.py --detect              # what is fitted right now?
+./tools/j106-camera-config.py --imx296 C,D,E,F      # ports C-F IMX296, rest IMX219: build+deploy+reboot+verify
+./tools/j106-camera-config.py --imx296 F --no-deploy # just build the DTB for that population
+```
+
+Everything not listed under `--imx296` defaults to IMX219. A population that has already been built
+is **reused**, so repeating a configuration is a LABEL selection and a reboot with no rebuild. Each
+population gets its own DTB and LABEL (`cam296-cdef`, `cam296-f`, …), so switching back is just
+re-running the command — the previous LABELs stay in `extlinux.conf` as fallbacks.
+
+Correctness check: regenerating the currently-deployed population reproduces the hand-built DTB
+**byte-for-byte**.
+
+What it does *not* do: rebuild the kernel (unnecessary — both drivers are built in), and it picks the
+ISP tuning by majority family, because that file is global (see §7). It needs the `j106build/` tree
+present for `stock-c03.dts` and the cross-toolchain includes.
+
 #### Case 1 — refitting IMX219 on the currently-empty A/B: **no DT change**
 
 The `imx219_a@10` / `imx219_b@12` nodes were deliberately **left in the tree**, with `bus-width = <2>`
