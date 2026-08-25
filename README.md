@@ -823,6 +823,76 @@ if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux m
 
 ---
 
+### 6.7 Swapping sensors: IMX219 ⇄ IMX296 integration procedure
+
+**First, find out what is actually fitted** — Tegra binds sensors from a *static* device tree, so
+nothing auto-detects. [`tools/j106-detect-cameras.sh`](tools/j106-detect-cameras.sh) probes the three
+camera i²c buses and prints the population plus the lane budget:
+
+```
+port A  i2c-1   -- empty --          port D  i2c-2   imx296 (bound)
+port B  i2c-1   -- empty --          port E  i2c-7   imx296 (bound)
+port C  i2c-2   imx296 (bound)       port F  i2c-7   imx296 (bound)
+summary: 0 x imx219, 4 x imx296   |  CSI lanes needed: 4
+```
+
+#### Case 1 — refitting IMX219 on the currently-empty A/B: **no DT change**
+
+The `imx219_a@10` / `imx219_b@12` nodes were deliberately **left in the tree**, with `bus-width = <2>`
+on all three hops, their own NVCSI channels 0/1, unique `module0`/`module1` Argus entries, and
+`num_csi_lanes = <8>` already counting them at 2 lanes each. `CONFIG_VIDEO_IMX219=y` is still built
+in. Plug the modules in and reboot — an unpopulated node simply fails probe harmlessly, which is what
+the current boot log shows. Only the two caveats in *"system settings that move together"* below apply.
+
+#### Case 2 — IMX219 replacing an IMX296 port (or vice versa): **DT change required**
+
+Per port swapped, in `tegra186-camera-j106-imx219.dtsi`:
+
+| Step | IMX296 → IMX219 |
+|---|---|
+| 1. Sensor node | `imx296_x@1a`/`@18` → `imx219_x@10`/`@12`, with `IMX219_HW_RESOURCES` and all five `mode0..4` nodes |
+| 2. Lane width | `bus-width` `<1>` → `<2>` at **all three hops**: sensor endpoint, `nvcsi channel@N`, `vi port@N` |
+| 3. Lane budget | recompute `num_csi_lanes` (+1 per swapped port) |
+| 4. Argus module | badge, `devname`, `proc-device-tree` for that port |
+| 5. Rebuild | DTB only — both drivers are already built into the Image (§6.2/§6.3), then deploy §6.4 |
+
+Commit `2dbf7f9` is exactly this transformation in the other direction and reads as a template.
+
+#### Can this be done without touching the device tree?
+
+**Not for a single port, no** — and it is worth understanding why, because the reason is structural
+rather than an oversight. Each sensor node's `remote-endpoint` binds **1:1** to an NVCSI channel, and
+the lane width is a static property of that channel. Two sensor nodes pointing at one channel make the
+media graph ambiguous. (The i²c addresses themselves do *not* collide — `0x10`/`0x12` vs `0x1a`/`0x18`
+— so an IMX219 and an IMX296 can happily share a *bus*, just not a *port*.)
+
+**Raspberry Pi does not merge them either.** What Pi OS does is *auto-select*:
+
+| | Raspberry Pi OS | This board (L4T R32.7.6 / TX2) |
+|---|---|---|
+| Detection | firmware probes the CSI i²c bus at boot | none — Linux needs a DT before it can probe |
+| Selection | `camera_auto_detect=1` in `config.txt` loads the matching `imx219.dtbo` / `imx296.dtbo` | one pre-built **DTB per population**, chosen by an `extlinux` **LABEL** |
+| Force a sensor | `camera_auto_detect=0` + `dtoverlay=imx296` (`,cam0`/`,cam1`) | set `DEFAULT <label>` in `extlinux.conf` |
+| ISP tuning | libcamera picks `imx296.json` **by sensor name**, automatically | `camera_overrides.isp` is **global** — must be swapped together with the DTB |
+
+So the Pi equivalent here is "keep one DTB per configuration and pick the LABEL", which is exactly what
+§6.4 and §6.6 already do. Automating it would mean a boot-time service that runs the detect script and
+rewrites `DEFAULT` (then reboots once) — the *selection* can be automated, the *merging* cannot.
+
+#### System settings that move together
+
+Changing sensor family is never only the DT. All four of these must agree:
+
+1. **DTB / extlinux LABEL** — the sensor nodes and lane widths (§6.4, rollback §6.6).
+2. **ISP tuning** — `ISP_FILE=` in `deploy-j106.sh`: `camera_overrides.imx296.isp` (default) or
+   `camera_overrides.isp` for the Arducam IMX219 tuning. **Global to all sensors**, so a mixed board
+   cannot have both families correct; whichever loses should consume **raw V4L2**, which bypasses the
+   ISP and is correct for both.
+3. **AE clamp** — `ARGUS_EXP`/`ARGUS_GAIN`/`ARGUS_DGAIN`. The defaults are tuned for the IMX296;
+   IMX219 tolerates far longer exposures (its DT allows up to 683 ms).
+4. **`/dev/videoN` indices shift.** Adding A/B pushes C–F from `video0..3` to `video2..5`. The grid
+   tools resolve cameras by i²c name and are unaffected; anything of yours pinning node numbers is not.
+
 ## 7. Status & open issues
 
 **Deployed config — default boot `j106imx296`** (reversible via `extlinux` LABELs; fallbacks kept,
