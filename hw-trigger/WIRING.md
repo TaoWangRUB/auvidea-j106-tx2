@@ -200,8 +200,9 @@ external component:
 
 ### 4.1 Trigger — MCU → 4 cameras (required)
 
-**5 wires. No external components at all.** The module's own `R4 = 200 Ω` sets the LED current, so
-the STM32 pins connect straight to the trigger pads. One TIM1 channel per camera, all four on the
+**No external components at all** — the module's own `R4 = 200 Ω` sets the LED current, so the
+STM32 pins connect straight to the trigger pads. **5 wires** with a common return, or 8 as four
+twisted pairs; see §5 for which and why. One TIM1 channel per camera, all four on the
 same counter — so the frame start is identical across cameras by construction, while each channel
 can carry its own exposure. No connection to camera ground anywhere.
 
@@ -220,10 +221,13 @@ can carry its own exposure. No connection to camera ground anywhere.
 | `TIM1_CH2` | **`E11`** | P2‑34 | → | CSI‑**D** `Trig+` |
 | `TIM1_CH3` | **`E13`** | P2‑36 | → | CSI‑**E** `Trig+` |
 | `TIM1_CH4` | **`E14`** | P2‑37 | → | CSI‑**F** `Trig+` |
-| Ground | **`GND`** | P2‑43 | → | `Trig−`, all four (tie together) |
+| Ground | **`GND`** | P2‑43 / P2‑44 | → | `Trig−` — one shared return, or one per channel (§5) |
 
 4 × 10.3 mA = 41 mA total, spread across four pins — each well inside the STM32's 25 mA per-pin
 limit.
+
+⚠ **`PE14` is in the opposite header column from the other three** — see the pin map in §5 before
+soldering.
 
 > ### ⚠ Do NOT add a series resistor at 3.3 V
 > The module already has `R4 = 200 Ω`. At 3.3 V that is *more* resistance than 20 mA would need
@@ -354,19 +358,73 @@ pin if it maps to a Tegra GPIO on TX2.
 
 ---
 
-## 5. Cable practice
+## 5. Cable practice and harness topology
 
 The isolation removes most of what usually makes this fiddly — there is no shared ground with the
-cameras, so no ground loops and no star-point discipline to get right.
+cameras, so no ground loops and no star-point discipline.
 
-- **Twist each pair.** Each channel's anode wire twisted with the common cathode return, ideally
-  < 30 cm. An LED loop is low-impedance and not especially noise-sensitive, but a twisted pair also
-  stops *it* radiating into the CSI harness.
-- **Keep it away from the CSI FFCs**, which are the noisiest thing on the carrier.
+### Header layout — mind the column
+
+```
+        WeAct P2 header  (odd | even)
+   row 16    31 PE8  | 32 PE9     <- CH1
+   row 17    33 PE10 | 34 PE11    <- CH2
+   row 18    35 PE12 | 36 PE13    <- CH3
+   row 19    37 PE14 | 38 PE15    <- CH4   ** OPPOSITE COLUMN **
+   row 20    39 PB10 | 40 PB11
+   row 21    41 3V3  | 42 5V
+   row 22    43 GND  | 44 GND
+```
+
+CH1–CH3 are three consecutive pins down the **even** column; **CH4 is in the odd column**, one row
+below CH3. Easy to miscount when soldering. (`PE8` and `PE15` are `TIM1_CH1N` and `TIM1_BKIN`, not
+usable as channel outputs — which is why the run is not contiguous.)
+
+`PE11`/`PE13`/`PE14` are shared with the on-board TFT-LCD header. Fine here — the LCD is not fitted
+— but do not populate both.
+
+### Two harness topologies
+
+**Option A — four twisted pairs (8 wires).** Each channel gets its own return, twisted with its
+signal along the run; the four returns join at the WeAct `GND` pins. Electrically the cleanest:
+every LED loop is a closed twisted pair with minimal loop area.
+
+```
+  PE9  p32 --( twisted pair )--> Trig+ / Trig-   CSI-C
+  PE11 p34 --( twisted pair )--> Trig+ / Trig-   CSI-D
+  PE13 p36 --( twisted pair )--> Trig+ / Trig-   CSI-E
+  PE14 p37 --( twisted pair )--> Trig+ / Trig-   CSI-F
+  4 returns land together on p43 / p44
+```
+
+**Option B — common return (5 wires).** One return shared by all four, bundled alongside the four
+signals.
+
+```
+  PE9  p32 -----------------> Trig+  CSI-C
+  PE11 p34 -----------------> Trig+  CSI-D
+  PE13 p36 -----------------> Trig+  CSI-E
+  PE14 p37 -----------------> Trig+  CSI-F
+  GND  p43 ---+---+---+---+-> Trig-  (all four)
+```
+
+**Option B is adequate here, and is the default.** The numbers are undramatic: 10 mA per channel,
+and the module's own 200 Ω against ~100 pF of cable gives a current risetime around 20 ns, so
+`di/dt ≈ 2×10^5 A/s`, firing 30 times a second. The only nearby thing worth protecting is the CSI
+harness, which is differential and running at 1188 Mbps — a 30 Hz, 10 mA pulse will not trouble it.
+
+Use Option A if the runs get long, if the harness must lie along the FFCs, or simply to be
+conservative.
+
+### What actually matters, either way
+
+- **Short runs** — under ~30 cm.
+- **Do not run alongside the CSI FFCs.** Cross them at right angles if you must; they are the
+  noisiest thing on the carrier.
+- **Keep the return adjacent to the signals** in the bundle, not routed off on its own — that is
+  what sets loop area in Option B.
 - **No series resistors** — the module's own `R4 = 200 Ω` sets the current (§4.1). Only a supply
   above ~3.3 V needs external resistance.
-- **`PE11`/`PE13`/`PE14` are shared with the on-board TFT-LCD header.** Fine here — the LCD is not
-  fitted — but do not populate both.
 
 ## 6. Firmware — build and flash
 
