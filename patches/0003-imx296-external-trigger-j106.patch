@@ -1,0 +1,279 @@
+Subject: [PATCH] imx296: external hardware trigger (Fast Trigger mode) for the J106 rig
+
+The four IMX296 on J106 ports C-F each free-run on their own on-module
+oscillator, so their frame clocks drift against each other without bound -
+exactly the failure a global shutter is supposed to remove. The sensor can
+instead take its frame timing from its XTRIG pin, which is the only way to make
+four independent modules expose at the same instant.
+
+This adds that mode. The trigger itself is generated off-board by a hardware
+timer (see hw-trigger/WIRING.md for why not from the TX2: no PWM-capable pad on
+this carrier is free, so a TX2-sourced trigger would be a software-toggled GPIO,
+and in this mode timing jitter turns directly into exposure noise).
+
+Fast Trigger mode is used, not Sequential Trigger:
+
+  - Fast Trigger is a MASTER-mode feature (XMASTER low), which is how these
+    modules are already strapped - proven by the fact that they free-run at all.
+    No strapping change, and no XVS/XHS wiring: the sensor keeps its own
+    timebase and only the frame start comes from outside. One wire, not three.
+  - Sequential Trigger is slave-mode only and would additionally require an
+    externally generated 67.5 kHz XHS fanned out to four boards.
+
+Exposure becomes the XTRIG low pulse width (t_exp = t_low + 14.26 us), so it is
+no longer a sensor register. Three consequences, all handled here:
+
+  - set_exposure() stops writing SHS1 while triggered. It still returns success,
+    because failing it would fail the stream, but it says once per stream that
+    the value is being ignored and where the exposure actually comes from.
+
+  - set_frame_rate() pins VMAX to the readout mode's own length while triggered.
+    Frame period comes from XTRIG, so VMAX only has to describe the readout -
+    and leaving it under control of the frame_rate control is actively harmful:
+    with override_enable=1 tegracam re-applies that control at its DT *minimum*
+    of 2 fps, VMAX becomes 33750, and VI then dies with PXL_SOF syncpt timeout
+    for the rest of the boot. This is the trap already documented in README
+    Stage 7; in trigger mode it is now structurally impossible.
+
+  - The selection is latched in set_mode(), not start_streaming(), because
+    tegracam runs set_mode() -> control overrides -> start_streaming() and the
+    two handlers above must already know the mode when the overrides land.
+
+The mode change itself has to ride on the standby cycle that stream start
+already performs - the sensor forbids changing fast-trigger mode during
+operation - so TRIGEN/LOWLAGTRG/SYNCSEL are written after STANDBY is cleared but
+before XMSTA is released. That ordering, and the SYNCSEL byte values, follow the
+Raspberry Pi imx296 driver (rpi-6.6.y), the reference implementation for this
+mode. SYNCSEL is written as a whole byte (0xc0 normal / 0xf0 Hi-Z) rather than
+as its documented [5:4] field, because bits [7:6] must stay 11b - something only
+that driver records, not the datasheet.
+
+Control is a module parameter rather than a device tree property. All four
+sensors are driven from ONE shared XTRIG net, so there is no per-sensor
+configuration to express; and this way switching modes needs no DTB rebuild and
+no reboot, which makes the free-running/triggered comparison - the acceptance
+test for the wiring - a two-second operation. Name and semantics match the
+Raspberry Pi driver's: trigger_mode, 0 = default, 1 = XTRIG.
+
+Default is 0, so a board with no trigger wired behaves exactly as before.
+
+  echo 1 | sudo tee /sys/module/imx296/parameters/trigger_mode
+
+Applies on top of 0002. No device tree change.
+--- a/kernel/nvidia/drivers/media/i2c/imx296.c
++++ b/kernel/nvidia/drivers/media/i2c/imx296.c
+@@ -42,13 +42,43 @@
+ 
+ #include "imx296_mode_tbls.h"
+ 
++/*
++ * External hardware trigger (IMX296 "Fast Trigger" mode).
++ *
++ * 0 = free-running (default, and what the sensor has always done here)
++ * 1 = the sensor waits for a falling edge on its XTRIG pin, and the LOW pulse
++ *     width sets the exposure - see hw-trigger/WIRING.md.
++ *
++ * Deliberately a module parameter and not a device-tree property: the J106
++ * rig drives all four IMX296 from ONE shared XTRIG net, so there is no
++ * per-sensor configuration to express, and this way switching modes needs no
++ * DTB rebuild and no reboot. Read at set_mode(), so it takes effect on the
++ * next stream start. Name and semantics match the Raspberry Pi imx296 driver.
++ */
++static int trigger_mode;
++module_param(trigger_mode, int, 0644);
++MODULE_PARM_DESC(trigger_mode,
++	"0 = free-running (default), 1 = external XTRIG hardware trigger");
++
+ /* Register addresses (16-bit address, 8-bit data).
+  * Registers wider than 8 bits are little-endian across consecutive
+  * addresses - see imx296_read_mbreg()/imx296_write_mbreg(). */
+ #define IMX296_CTRL00				0x3000
+ #define IMX296_CTRL00_STANDBY			BIT(0)
++#define IMX296_CTRL0A				0x300a
++#define IMX296_CTRL0A_XMSTA			BIT(0)
++#define IMX296_CTRL0B				0x300b
++#define IMX296_CTRL0B_TRIGEN			BIT(0)
+ #define IMX296_CTRL08				0x3008
+ #define IMX296_CTRL08_REGHOLD			BIT(0)
++/* XVS/XHS pin direction. These are whole-byte values, NOT a [5:4] bitfield:
++ * bits [7:6] must stay 11b. Taken from the Raspberry Pi imx296 driver, which
++ * is the only source that documents the reserved bits. */
++#define IMX296_SYNCSEL				0x3036
++#define IMX296_SYNCSEL_NORMAL			0xc0
++#define IMX296_SYNCSEL_HIZ			0xf0
++#define IMX296_LOWLAGTRG			0x30ae
++#define IMX296_LOWLAGTRG_FAST			BIT(0)
+ #define IMX296_VMAX				0x3010	/* 24-bit, VMAX[19:0] */
+ #define IMX296_HMAX				0x3014	/* 16-bit */
+ #define IMX296_INCKSEL(n)			(0x3089 + (n))
+@@ -131,6 +161,8 @@
+ 	u32				frame_length;	/* VMAX, lines */
+ 	u32				hmax;
+ 	bool				mono;
++	bool				triggered;	/* latched from trigger_mode */
++	bool				trig_exp_warned;
+ };
+ 
+ static const struct regmap_config sensor_regmap_config = {
+@@ -265,6 +297,28 @@
+ 	if (val <= 0)
+ 		return -EINVAL;
+ 
++	/*
++	 * Under an external trigger the frame period is set by XTRIG, not by
++	 * VMAX, so VMAX must simply describe the readout. Pin it to the mode's
++	 * own length: otherwise tegracam's override pass re-applies the
++	 * frame_rate control at its DT *minimum* (2 fps), VMAX becomes 33750,
++	 * and VI dies with PXL_SOF syncpt timeout for the rest of the boot.
++	 */
++	if (priv->triggered) {
++		frame_length = s_data->fmt_height + IMX296_MIN_VBLANK;
++
++		dev_dbg(dev, "%s: triggered; VMAX pinned to %u [lines]\n",
++			__func__, frame_length);
++
++		err = imx296_write_mbreg(priv, IMX296_VMAX, frame_length, 3);
++		if (err)
++			return err;
++
++		priv->frame_length = frame_length;
++
++		return 0;
++	}
++
+ 	frame_length = (u32)div64_u64(
+ 		IMX296_INTERNAL_CLK_HZ *
+ 			(u64)mode->control_properties.framerate_factor,
+@@ -311,6 +365,21 @@
+ 	if (val < 0)
+ 		val = 0;
+ 
++	/*
++	 * In trigger mode the exposure is the XTRIG low pulse width, generated
++	 * off-board; SHS1 does not control it. Accept the call so the stream
++	 * does not fail, but do not pretend to program the sensor.
++	 */
++	if (priv->triggered) {
++		if (!priv->trig_exp_warned) {
++			dev_info(dev,
++				"exposure comes from the XTRIG pulse width in external-trigger mode; ignoring %lld (set it on the trigger generator)\n",
++				val);
++			priv->trig_exp_warned = true;
++		}
++		return 0;
++	}
++
+ 	/* exposure time -> internal-clock ticks */
+ 	ticks = div64_u64((u64)val * IMX296_INTERNAL_CLK_HZ,
+ 		(u64)mode->control_properties.exposure_factor);
+@@ -617,6 +686,15 @@
+ 	unsigned int i;
+ 	int err;
+ 
++	/*
++	 * Latch the trigger selection here, not in start_streaming(): tegracam
++	 * runs set_mode() -> ctrl overrides -> start_streaming(), so the
++	 * exposure and frame_rate handlers below already need to know which
++	 * mode this stream is in by the time the overrides are applied.
++	 */
++	priv->triggered = (trigger_mode == 1);
++	priv->trig_exp_warned = false;
++
+ 	err = imx296_write_table(priv, mode_table[IMX296_MODE_COMMON]);
+ 	if (err)
+ 		return err;
+@@ -651,11 +729,60 @@
+ 	return 0;
+ }
+ 
++/*
++ * Start of stream, with the trigger-mode selection folded in.
++ *
++ * The sensor forbids changing fast-trigger mode during operation, so the mode
++ * change has to ride on the standby cycle the stream start already performs:
++ * leave standby, program TRIGEN/LOWLAGTRG/SYNCSEL while master operation is
++ * still stopped, and only then release XMSTA. This is the same ordering the
++ * Raspberry Pi imx296 driver uses, which is the reference implementation for
++ * this mode.
++ *
++ * Replaces the old imx296_start_stream[] table, which could not express
++ * "write something in the middle".
++ */
+ static int imx296_start_streaming(struct tegracam_device *tc_dev)
+ {
+ 	struct imx296 *priv = (struct imx296 *)tegracam_get_privdata(tc_dev);
++	struct camera_common_data *s_data = tc_dev->s_data;
++	struct device *dev = tc_dev->dev;
++	bool trig = priv->triggered;
++	int err;
++
++	/* Leave software standby. */
++	err = imx296_write_reg(s_data, IMX296_CTRL00, 0);
++	if (err)
++		return err;
++
++	usleep_range(5000, 6000);
++
++	err = imx296_write_reg(s_data, IMX296_CTRL0B,
++		trig ? IMX296_CTRL0B_TRIGEN : 0);
++	if (err)
++		return err;
++
++	err = imx296_write_reg(s_data, IMX296_LOWLAGTRG,
++		trig ? IMX296_LOWLAGTRG_FAST : 0);
++	if (err)
++		return err;
++
++	/*
++	 * XVS/XHS are outputs in master mode. Park them high-Z while triggered
++	 * so that several modules wired in parallel cannot contend on those
++	 * pads; restore the normal setting when free-running.
++	 */
++	err = imx296_write_reg(s_data, IMX296_SYNCSEL,
++		trig ? IMX296_SYNCSEL_HIZ : IMX296_SYNCSEL_NORMAL);
++	if (err)
++		return err;
++
++	dev_info(dev, "streaming: %s\n", trig ?
++		"EXTERNAL TRIGGER (XTRIG, fast trigger; exposure = pulse width)" :
++		"free-running");
+ 
+-	return imx296_write_table(priv, mode_table[IMX296_START_STREAM]);
++	/* Release master stop - from here the sensor runs, or waits for XTRIG. */
++	return imx296_write_reg(s_data, IMX296_CTRL0A, 0);
+ }
+ 
+ static int imx296_stop_streaming(struct tegracam_device *tc_dev)
+--- a/kernel/nvidia/drivers/media/i2c/imx296_mode_tbls.h
++++ b/kernel/nvidia/drivers/media/i2c/imx296_mode_tbls.h
+@@ -31,12 +31,9 @@
+  * Datasheet: CTRL00[0] = STANDBY, CTRL0A[0] = XMSTA (master start/stop).
+  * Order matters - leave standby first, let the internal PLL settle, then
+  * release XMSTA. Stopping is the exact reverse. */
+-static imx296_reg imx296_start_stream[] = {
+-	{0x3000, 0x00},			/* CTRL00: clear STANDBY */
+-	{IMX296_TABLE_WAIT_MS, 5},
+-	{0x300a, 0x00},			/* CTRL0A: release XMSTA */
+-	{IMX296_TABLE_END, 0x00}
+-};
++/* There is no start-stream table: the start sequence has to write the
++ * trigger-mode registers between clearing STANDBY and releasing XMSTA, which
++ * a flat table cannot express. See imx296_start_streaming(). */
+ 
+ static imx296_reg imx296_stop_stream[] = {
+ 	{0x300a, 0x01},			/* CTRL0A: XMSTA (master stop) */
+@@ -114,14 +111,12 @@
+ enum {
+ 	IMX296_MODE_1456x1088_60FPS,
+ 	IMX296_MODE_COMMON,
+-	IMX296_START_STREAM,
+ 	IMX296_STOP_STREAM,
+ };
+ 
+ static imx296_reg *mode_table[] = {
+ 	[IMX296_MODE_1456x1088_60FPS]	= imx296_mode_1456x1088,
+ 	[IMX296_MODE_COMMON]		= imx296_mode_common,
+-	[IMX296_START_STREAM]		= imx296_start_stream,
+ 	[IMX296_STOP_STREAM]		= imx296_stop_stream,
+ };
+ 

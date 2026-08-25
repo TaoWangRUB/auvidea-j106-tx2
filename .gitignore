@@ -29,3 +29,5 @@ bsp-r32.2/official/
 bsp-r32.2/auvidea/
 bsp-r32.2/*.dts
 bsp-r32.2/*.log
+__pycache__/
+hw-trigger/firmware/build/

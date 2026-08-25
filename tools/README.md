@@ -18,3 +18,49 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now j106-recovery-key.service
 ```
 To boot back out of recovery, tap **Reset** (without holding recovery).
+
+## j106-trigctl — drive the IMX296 external-trigger generator
+
+**Runs wherever the serial link is** — on the board if the STM32H7 is wired to M110 `J22`
+(a `/dev/ttyTHS*`), on the build host if it is on a USB-serial dongle (`/dev/ttyUSB*`).
+It never touches the cameras.
+
+The generator owns both the frame rate **and the exposure**: in the IMX296's Fast Trigger
+mode the `XTRIG` low pulse width *is* the exposure time, so the sensor's own exposure
+control does nothing while triggered.
+
+```bash
+./j106-trigctl.py --port /dev/ttyUSB0 status
+./j106-trigctl.py fps 30 --exposure 5000     # 30 fps, 5 ms exposure
+./j106-trigctl.py start
+./j106-trigctl.py burst 300                  # 300 pulses, then stop
+./j106-trigctl.py stop
+```
+
+Firmware and wiring: [`../hw-trigger/`](../hw-trigger/WIRING.md).
+
+## j106-sync-check — measure inter-camera frame synchronisation
+
+> **RUN THIS ON THE BOARD.** It opens `/dev/video*` directly.
+
+The acceptance test for the hardware trigger. Streams every camera at once and compares
+V4L2 buffer timestamps, judging on two independent criteria — the **constant offset**
+between cameras, and the **drift rate** of that offset. Either alone can be fooled: a
+short run hides drift between same-batch crystals (they can be only a few ppm apart),
+while offset alone cannot distinguish a well-phased pair from a triggered one.
+
+```bash
+sudo systemctl stop nvargus-daemon      # the nodes must be free
+./j106-sync-check.py -n 600             # ~20 s at 30 fps
+```
+
+Measured free-running baseline (4× IMX296, ports C–F, 2026-08-25):
+
+```
+worst skew 2430.0 us over 20.0 s; worst drift 8.33 us/s
+verdict: NOT synchronised — free-running.
+```
+
+— i.e. the cameras sit up to **2.4 ms apart**, at a phase that is **re-randomised on every
+stream start**, drifting a further 3–8 µs/s. That is the number the hardware trigger has to
+beat.
