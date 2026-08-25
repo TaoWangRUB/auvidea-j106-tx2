@@ -59,6 +59,7 @@ brightness. A WeAct MiniSTM32H7 already on hand generates the same pulse from a 
 - **Modified**: `patches/0002-imx296-tegracam-j106.patch` stays as-is; `0003` applies on top.
 - **Modified**: `README.md` (new stage section + status), `CLAUDE.md` (repo layout).
 - **Unchanged**: device tree. This change touches no `.dtsi`, so the deployed DTB is unaffected.
-- **Hardware**: 5 wires (4 anodes + 1 common cathode return) and **no external components** — the
-  module carries its own 200 Ω LED resistor. No shared ground with the cameras. Optionally 3 more
+- **Hardware**: 8 conductors (4 signals + 4 returns, run as four twisted pairs) and **no external
+  components** — the module carries its own 200 Ω LED resistor. It is five *nets*, but the ground
+  node still has to reach four separate boards. No shared ground with the cameras. Optionally 3 more
   wires for the serial link to the M110 `J22` header.

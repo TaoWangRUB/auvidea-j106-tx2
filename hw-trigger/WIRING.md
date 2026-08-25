@@ -81,7 +81,7 @@ flowchart LR
 
 | | carries | over |
 |---|---|---|
-| **Trigger** | when to expose, and for how long | 5 wires (4 anodes + 1 common cathode return), MCU → cameras, **galvanically isolated** |
+| **Trigger** | when to expose, and for how long | 8 conductors as 4 twisted pairs (§5), MCU → cameras, **galvanically isolated** |
 | **Control** | which mode the sensor is in, gain, readout | existing CSI/I²C harness, TX2 → cameras |
 
 The TX2 never touches the trigger wiring. The MCU never touches I²C, and never shares a ground with
@@ -201,8 +201,9 @@ external component:
 ### 4.1 Trigger — MCU → 4 cameras (required)
 
 **No external components at all** — the module's own `R4 = 200 Ω` sets the LED current, so the
-STM32 pins connect straight to the trigger pads. **5 wires** with a common return, or 8 as four
-twisted pairs; see §5 for which and why. One TIM1 channel per camera, all four on the
+STM32 pins connect straight to the trigger pads. **8 conductors**: four signals and four returns,
+run as four twisted pairs. (It is five *nets*, but the ground node still has to reach four separate
+boards — see §5.) One TIM1 channel per camera, all four on the
 same counter — so the frame start is identical across cameras by construction, while each channel
 can carry its own exposure. No connection to camera ground anywhere.
 
@@ -221,7 +222,7 @@ can carry its own exposure. No connection to camera ground anywhere.
 | `TIM1_CH2` | **`E11`** | P2‑34 | → | CSI‑**D** `Trig+` |
 | `TIM1_CH3` | **`E13`** | P2‑36 | → | CSI‑**E** `Trig+` |
 | `TIM1_CH4` | **`E14`** | P2‑37 | → | CSI‑**F** `Trig+` |
-| Ground | **`GND`** | P2‑43 / P2‑44 | → | `Trig−` — one shared return, or one per channel (§5) |
+| Ground | **`GND`** | P2‑43 / P2‑44 | → | `Trig−` × 4 — one return per channel, two wires per GND pin (§5) |
 
 4 × 10.3 mA = 41 mA total, spread across four pins — each well inside the STM32's 25 mA per-pin
 limit.
@@ -383,38 +384,44 @@ usable as channel outputs — which is why the run is not contiguous.)
 `PE11`/`PE13`/`PE14` are shared with the on-board TFT-LCD header. Fine here — the LCD is not fitted
 — but do not populate both.
 
-### Two harness topologies
+### Harness topology — count conductors, not nets
 
-**Option A — four twisted pairs (8 wires).** Each channel gets its own return, twisted with its
-signal along the run; the four returns join at the WeAct `GND` pins. Electrically the cleanest:
-every LED loop is a closed twisted pair with minimal loop area.
+The trigger is **5 nets** (four signals plus one ground node), and it is tempting to call that
+5 wires. It is not. The ground node has to physically reach four `Trig−` pads on four separate
+boards, so in a star from the MCU:
 
-```
-  PE9  p32 --( twisted pair )--> Trig+ / Trig-   CSI-C
-  PE11 p34 --( twisted pair )--> Trig+ / Trig-   CSI-D
-  PE13 p36 --( twisted pair )--> Trig+ / Trig-   CSI-E
-  PE14 p37 --( twisted pair )--> Trig+ / Trig-   CSI-F
-  4 returns land together on p43 / p44
-```
+| Topology | Nets | **Conductors leaving the MCU** |
+|---|---|---|
+| Common return, star | 5 | 4 signal + 4 return = **8** |
+| Four twisted pairs | 8 | 4 signal + 4 return = **8** |
 
-**Option B — common return (5 wires).** One return shared by all four, bundled alongside the four
-signals.
+**The same.** So twisting costs nothing and is strictly better — each LED loop is closed with
+minimal enclosed area instead of four loops sharing an ill-defined return path.
 
 ```
-  PE9  p32 -----------------> Trig+  CSI-C
-  PE11 p34 -----------------> Trig+  CSI-D
-  PE13 p36 -----------------> Trig+  CSI-E
-  PE14 p37 -----------------> Trig+  CSI-F
-  GND  p43 ---+---+---+---+-> Trig-  (all four)
+  PE9  p32 ===+=====================> Trig+   CSI-C
+  GND  p43 ===+   twisted pair         Trig-
+
+  PE11 p34 ===+=====================> Trig+   CSI-D
+  GND  p43 ===+                        Trig-
+
+  PE13 p36 ===+=====================> Trig+   CSI-E
+  GND  p44 ===+                        Trig-
+
+  PE14 p37 ===+=====================> Trig+   CSI-F
+  GND  p44 ===+                        Trig-
+
+  the four returns share p43 / p44 at the connector - two wires per GND pin
 ```
 
-**Option B is adequate here, and is the default.** The numbers are undramatic: 10 mA per channel,
-and the module's own 200 Ω against ~100 pF of cable gives a current risetime around 20 ns, so
-`di/dt ≈ 2×10^5 A/s`, firing 30 times a second. The only nearby thing worth protecting is the CSI
-harness, which is differential and running at 1188 Mbps — a 30 Hz, 10 mA pulse will not trouble it.
+**Daisy-chaining the return** is the only way to reduce the conductor count at the connector — one
+wire to the first camera, then jumpers between cameras: 5 from the MCU, but still 8 segments
+overall. Not recommended:
 
-Use Option A if the runs get long, if the harness must lie along the FFCs, or simply to be
-conservative.
+- On a BEV rig the four cameras point in four directions and are far apart, so a return threaded
+  between them encloses a large loop.
+- One broken jumper silently kills every camera downstream of it, and the symptom (some cameras
+  stop triggering) does not obviously point at a wire.
 
 ### What actually matters, either way
 
