@@ -52,10 +52,16 @@ register reads back zero while standby is asserted.
 
 This patch is independent of 0001-imx219-share-reset-gpio-j106.patch: they
 touch disjoint files and can be applied or reverted in either order.
+Note on the power-on settle time: all six J106 CSI resets are one line and the
+imx219 driver pulses it at boot (patch 0001), so an IMX296 can be probed within
+milliseconds of leaving reset. The datasheet's t4 + t5 + t9 (200 us + 21.2 ms +
+1.2 ms) wait is therefore load-bearing here - without it the FIRST sensor probed
+on each i2c bus fails its first register write with -EREMOTEIO while the second
+succeeds. A short retry around that first access backs it up.
 ---
 --- a/kernel/nvidia/drivers/media/i2c/imx296.c
 +++ b/kernel/nvidia/drivers/media/i2c/imx296.c
-@@ -0,0 +1,856 @@
+@@ -0,0 +1,878 @@
 +/*
 + * imx296.c - Sony IMX296 global shutter sensor driver (tegracam)
 + *
@@ -123,6 +129,7 @@ touch disjoint files and can be applied or reverted in either order.
 +#define IMX296_MIN_VBLANK			30	/* lines */
 +#define IMX296_MAX_VMAX				0xfffff	/* VMAX is 20-bit */
 +#define IMX296_HMAX_DEFAULT			1100	/* 44Ch, datasheet */
++#define IMX296_BOOT_RETRIES			5
 +
 +/*
 + * HMAX is a line length in units of an internal reference that the sensor
@@ -443,7 +450,15 @@ touch disjoint files and can be applied or reverted in either order.
 +			goto imx296_dvdd_fail;
 +	}
 +
-+	usleep_range(1000, 1100);
++	/* The sensor needs t4 + t5 + t9 (200 us + 21.2 ms + 1.2 ms per the
++	 * datasheet's power-on sequence) after the supplies are up and XCLR is
++	 * released before register communication is reliable. On the J106 this
++	 * matters even though the rails are always-on dummies: all six sensors
++	 * share one reset line, and the imx219 driver pulses it at boot (patch
++	 * 0001) - so an IMX296 can be probed within milliseconds of coming out
++	 * of reset. Without this wait the FIRST sensor probed on each bus fails
++	 * its very first register write with -EREMOTEIO. */
++	usleep_range(25000, 26000);
 +
 +	pw->state = SWITCH_ON;
 +
@@ -741,6 +756,7 @@ touch disjoint files and can be applied or reverted in either order.
 +	struct device *dev = s_data->dev;
 +	u32 sensor_info;
 +	u32 model;
++	int retry;
 +	int err = 0;
 +
 +	if (pdata->mclk_name) {
@@ -759,13 +775,25 @@ touch disjoint files and can be applied or reverted in either order.
 +
 +	/* The sensor information register cannot be read while the sensor is
 +	 * in standby - it reads back as zero. Leave standby, let it settle,
-+	 * then identify. */
-+	err = imx296_write_reg(s_data, IMX296_CTRL00, 0);
++	 * then identify.
++	 *
++	 * Retry the first access: this is the first i2c traffic to the sensor
++	 * after reset, and a module that is still settling NAKs it. Belt and
++	 * braces alongside the wait in imx296_power_on(). */
++	for (retry = 0; retry < IMX296_BOOT_RETRIES; retry++) {
++		err = imx296_write_reg(s_data, IMX296_CTRL00, 0);
++		if (!err)
++			break;
++		usleep_range(5000, 6000);
++	}
 +	if (err) {
 +		dev_err(dev, "%s: failed to leave standby (%d)\n",
 +			__func__, err);
 +		goto err_reg_probe;
 +	}
++	if (retry)
++		dev_dbg(dev, "%s: sensor answered after %d retries\n",
++			__func__, retry);
 +
 +	usleep_range(2000, 5000);
 +

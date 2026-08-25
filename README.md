@@ -669,6 +669,25 @@ sensor holds at **74.25 MHz regardless of INCK**, so all line/frame arithmetic u
 Datasheet closes the loop: `HMAX` 1100 / 74.25 MHz = 14.815 µs/line, and
 1/(`VMAX` 1118 × 14.815 µs) = **60.38 fps** vs the datasheet's stated 60.3.
 
+**Shared-reset settle race (found when C/D/E/F were all populated).** All six J106 CSI resets are
+one line, and the imx219 driver pulses it at boot (patch `0001`), so an IMX296 can be probed within
+milliseconds of leaving reset. With only a 1 ms wait in `power_on()` the **first sensor probed on
+each i2c bus** failed its very first register write with `-EREMOTEIO` while the second succeeded
+(`2-001a` failed / `2-0018` bound; same on bus 7) — and raw `i2ctransfer` to the "dead" address
+worked fine seconds later, which is what identified it as a settle race rather than a wiring fault.
+Fix: honour the datasheet's power-on wait (t4 + t5 + t9 = 200 µs + 21.2 ms + 1.2 ms) and retry the
+first register access. Both are in patch `0002`; the retry still fires occasionally on `7-001a`.
+
+**Port ↔ address map with two IMX296 per bus** (the shifter XORs address bit 1, so the north sensor
+sits at its native address and the south one at native⊕2):
+
+| Port | Bus | Sensor addr | Alias (SLAMODE) | Node |
+|---|---|---|---|---|
+| C | `3180000` (i2c‑2) | `0x1a` | `0x36` | `imx296_c@1a` |
+| D | `3180000` (i2c‑2) | `0x18` | `0x34` | `imx296_d@18` |
+| E | `c250000` (i2c‑7) | `0x1a` | `0x36` | `imx296_e@1a` |
+| F | `c250000` (i2c‑7) | `0x18` | `0x34` | `imx296_f@18` |
+
 **Verified on the board** (2026‑08‑24, `LABEL j106imx296`):
 - `imx296 7-0018` binds; probe logs `detected IMX296LQ (colour) (sensor info 0x4a00)`.
 - **No regression**: all five IMX219s still bind (`1-0010 1-0012 2-0010 2-0012 7-0010`) and still capture.
@@ -807,20 +826,23 @@ if that label's `APPEND` lacks `console=`), recover at the **U‑Boot extlinux m
 ## 7. Status & open issues
 
 **Deployed config — default boot `j106imx296`** (reversible via `extlinux` LABELs; fallbacks kept,
-incl. `j106fullfov`, `j106-imu`, `j106-680`): `Image.j106imx296` (4.9.337‑tegra #5, patches `0001`
+incl. `j106fullfov`, `j106-imu`, `j106-680`): `Image.j106imx296` (4.9.337‑tegra #6, patches `0001`
 = imx219 shared reset + 680 Mbps, and `0002` = **new imx296 driver**) + `j106imx296.dtb`
-(**5×IMX219 A–E + 1×IMX296 port F**, unique positions, 680 timing incl. mode3 = 1640×1232 full FoV,
-USB VBUS fix, onboard MPU‑9250 IMU). Deployed & verified 2026‑08‑24. Board: `ssh nvidia@10.42.0.157`
-(pw `nvidia`); board sudo `echo nvidia | sudo -S …`.
+(**4×IMX296 on C–F**, IMX219 nodes kept for A/B, USB VBUS fix, onboard MPU‑9250 IMU).
+Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`); board sudo
+`echo nvidia | sudo -S …`.
 
-> **Camera population changed 2026‑08‑24**: port F is now a **Sony IMX296LQR global shutter** module,
-> not an IMX219 — see §5 *Stage 7*. Ports A–E are unchanged IMX219 and were verified non‑regressed.
+> **Camera population changed again 2026‑08‑25**: ports **C, D, E, F all carry Sony IMX296LQR**
+> global-shutter modules (`2-001a`, `2-0018`, `7-001a`, `7-0018` → `/dev/video0..3`), and **A/B are
+> currently unpopulated** — their `imx219_a@10` / `imx219_b@12` nodes are deliberately left in the
+> tree so refitting IMX219 modules there needs **no DT change**. See §5 *Stage 7*.
 
 ### ✅ Working
-- **IMX296 global shutter on port F** — `imx296 7-0018` → `/dev/video5`, raw V4L2 `BG10` 1456×1088
-  @ ~60 fps (600/600 frames, no drops) and Argus `sensor-id=5` (6 cameras total). New tegracam driver
-  (`patches/0002`); INCK **measured** at 54 MHz; single-lane routing; no reset-gpio so the five IMX219s
-  are untouched. See §5 *Stage 7* (incl. the `override_enable=1` → 2 fps gotcha).
+- **IMX296 global shutter on ports C–F** — `2-001a`, `2-0018`, `7-001a`, `7-0018` →
+  `/dev/video0..3`, raw V4L2 `BG10` 1456×1088 @ ~60 fps and all four enumerated by Argus. New
+  tegracam driver (`patches/0002`); INCK **measured** at 54 MHz; single-lane routing; no reset-gpio,
+  so nothing touches the shared reset line. See §5 *Stage 7* (incl. the shared-reset settle race and
+  the `override_enable=1` → 2 fps gotcha).
 - **USB host ports** (M110) — VBUS fix in `override-usb.dtsi` (stock routes VBUS through devkit
   `pca953x` expanders absent on the carrier → `‑517` defer; fixed regulator forced always‑on).
 - **Fan control** — needs **two independent** fixes (both now in place):

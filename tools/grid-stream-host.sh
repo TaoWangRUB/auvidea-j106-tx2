@@ -44,8 +44,8 @@ CELL_PORT=(A B C D E F)
 cell_of_dev() {
   case "$1" in
     1-0010) echo 0;; 1-0012) echo 1;;          # A B
-    2-0010) echo 2;; 2-0012) echo 3;;          # C D
-    7-0010) echo 4;; 7-0012|7-0018) echo 5;;   # E F (F: imx219 @0x12 or imx296 @0x18)
+    2-0010|2-001a) echo 2;; 2-0012|2-0018) echo 3;;   # C D (imx219 0x10/0x12 or imx296 0x1a/0x18)
+    7-0010|7-001a) echo 4;; 7-0012|7-0018) echo 5;;   # E F (   "     "        "        "       )
     *)       echo -1;;
   esac
 }
