@@ -75,7 +75,7 @@
       reversed; both legs OL to a ground verified at 3.3 V powered, 1.9 kΩ unpowered). The
       level-translation gate is obsolete; the circuit was redesigned around current drive
 - [ ] 6.1b Read the optocoupler part number off a module if legible (sets the usable exposure floor)
-- [ ] 6.2 Wire 4× 220 Ω + common cathode return; confirm ~2.1 V across a resistor while triggering
+- [ ] 6.2 Wire 4 signal wires + common cathode return (no external components — module has R4=200 Ω)
 - [ ] 6.2b Determine working polarity (`pol 0`/`1`) and calibrate `skew`
 - [x] 6.3 Capture a free-running baseline with `j106-sync-check.py` — **done ahead of the wiring**: worst skew 2.43 ms, drift 8.33 µs/s over 20 s, phase re-randomised per stream start
 - [ ] 6.4 Set `trigger_mode=1`, start the trigger, and confirm all four cameras deliver frames
@@ -91,8 +91,10 @@
 
 ## 8. Redesign after the pad measurement (opto-isolated input)
 
-- [x] 8.1 Rewrite `WIRING.md` §2–§5, §7–§9 around current drive: 4 channels, 220 Ω sizing, no
-      shared ground, revised bring-up order
+- [x] 8.1 Rewrite `WIRING.md` §2–§5, §7–§9 around current drive: 4 channels, no shared ground,
+      revised bring-up order
+- [x] 8.6 Vendor manual found (TLP281 + on-module `R4 = 200 Ω`): remove the external resistors the
+      docs specified, add the 5 V variant, record why Ω-mode read OL and diode mode read 1.2 V
 - [x] 8.2 Firmware: 4 channels on one counter, per-channel exposure, runtime `pol` and `skew`
 - [x] 8.3 Spec: replace the level-translation requirement with "drive matched to the module's
       actual input type", and add "pulse sense and transport delay are correctable at runtime";

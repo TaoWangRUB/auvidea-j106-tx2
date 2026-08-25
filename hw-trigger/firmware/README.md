@@ -12,8 +12,9 @@ camera, all four on **one counter** — so the frame start is identical across c
 construction while each channel can carry its own exposure.
 
 The camera modules' trigger inputs are **optocoupler LEDs isolated from module ground** (measured —
-see [`../WIRING.md`](../WIRING.md) §3), so each pin sources ~9.5 mA through a 220 Ω resistor into an
-LED whose cathode returns to *this* board's ground. In the IMX296's Fast Trigger mode the asserted
+see [`../WIRING.md`](../WIRING.md) §3 — a TLP281), so each pin sources ~10.3 mA straight into an LED
+whose cathode returns to *this* board's ground. **No external resistor**: the module carries its own
+`R4 = 200 Ω`, which at 3.3 V already limits the current below the 20 mA the vendor recommends. In the IMX296's Fast Trigger mode the asserted
 pulse width *is* the exposure (`t_exp = t_pulse + 14.26 µs`), so the pulse is produced entirely by
 timer hardware — never by a software loop.
 

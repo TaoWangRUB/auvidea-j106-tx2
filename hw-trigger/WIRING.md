@@ -66,10 +66,10 @@ flowchart LR
         TOOL["j106-trigctl.py<br/>j106-sync-check.py"]
     end
 
-    P1 -->|"220R"| C
-    P2 -->|"220R"| D
-    P3 -->|"220R"| E
-    P4 -->|"220R"| F
+    P1 -->|"direct - module has R4=200R"| C
+    P2 --> D
+    P3 --> E
+    P4 --> F
     C & D & E & F -->|"LED cathode"| GND
     C & D & E & F -.->|"MIPI CSI-2, 1 lane each<br/>(existing FFC harness)"| VI
     DRV -->|"i2c — mode registers only"| C & D & E & F
@@ -143,8 +143,22 @@ own ground. Measured on the hardware, not inferred:
 | `XTR−` ↔ GND, powered | **OL** | Floating. |
 | `XTR+` ↔ GND, powered | **OL** | Floating. |
 
-Vendor documentation agrees: the Inno-Maker `CAM-IMX296RAW` manual calls the pads
-`XTR（Trig+）, GND(Trig-)` and says "multiple cameras can be connected to the same pulse".
+**The vendor manual confirms it and names the part.** The Inno-Maker IMX296 module manual
+(`manuals.plus/inno/imx296-sensor-module-manual`) documents the trigger input as optocoupled through
+a **TLP281**, calls the pads `XTR（Trig+）, GND(Trig-)`, and says "multiple cameras can be connected
+to the same pulse".
+
+**Critically, it also states the module carries its own series resistor: `R4 = 200 Ω`.**
+
+That single fact resolves both of the confusing bench readings *and* removes the need for any
+external component:
+
+- A 200 Ω resistor in series with the LED is why **resistance mode reads OL / tens of MΩ** — the
+  Ω-range test voltage cannot turn on a 1.25 V LED through 200 Ω. Diode mode reads the LED drop plus
+  the small drop across R4 at the meter's test current, i.e. **~1.2–1.45 V**. The two readings never
+  conflicted.
+- The manual's sizing formula is `R_total = (Vcc − Vf) / If` with `Vf = 1.25 V` and `If = 20 mA`
+  recommended. R4 already supplies 200 Ω of that total.
 
 ### What this changes — mostly for the better
 
@@ -157,20 +171,21 @@ Vendor documentation agrees: the Inno-Maker `CAM-IMX296RAW` manual calls the pad
 
 ### Consequences to hold on to
 
-1. **One GPIO cannot drive four.** An opto LED wants ~10 mA; four in parallel is 40 mA from one pin,
-   over the STM32's 25 mA absolute per-pin limit. Series is worse — 4 × 1.2 V = 4.8 V of LED drop,
-   more than a 3.3 V pin can push. Hence **one channel per camera** (§4.1). They still share one
-   timer counter, so the frame start is identical by construction.
+1. **One GPIO cannot drive four.** Each input draws ~10 mA at 3.3 V (see §4.1); four in parallel is
+   41 mA from one pin, over the STM32's 25 mA absolute per-pin limit. Series is worse — 4 × 1.25 V
+   of LED drop, more than a 3.3 V pin can push. Hence **one channel per camera** (§4.1). They still
+   share one timer counter, so the frame start is identical by construction.
 2. **The pulse *sense* is unknown.** Whether driving the LED asserts `XTRIG` or releases it depends
    on the module's internal wiring, which is behind the isolation barrier and cannot be probed from
    outside. The firmware has a runtime `pol` command for this; the default is idle-LED-off, the safe
    state.
-3. **The opto adds asymmetric delay, and pulse width is exposure.** Turn-on and turn-off delays
-   differ (µs, current- and temperature-dependent), so the sensor integrates slightly longer or
-   shorter than commanded. This is **identical on all four cameras**, so *synchronisation is
-   unaffected* — only absolute exposure. Measure once, set it with the firmware's `skew` command.
-   It also puts a floor on the shortest usable exposure: expect ~100 µs rather than the sensor's
-   own 14 µs.
+3. **The TLP281 is slow, and pulse width is exposure.** It is a phototransistor opto: response
+   times are single-digit µs typical, spec'd to ~18 µs, and **strongly dependent on forward
+   current**. Turn-on and turn-off differ, so the sensor integrates slightly longer or shorter than
+   commanded. This is **identical on all four cameras**, so *synchronisation is unaffected* — only
+   absolute exposure. Measure once, set it with the firmware's `skew` command. It also puts a floor
+   on the shortest usable exposure: expect **~100 µs** rather than the sensor's own 14 µs.
+   Driving at 5 V (17.8 mA) switches noticeably faster than at 3.3 V (10.3 mA) — see §4.1b.
 4. **LED polarity.** With the meter's red (positive) lead on `XTR−` it conducted, so `XTR−` is the
    **anode** and `XTR+` the cathode — the opposite of what the labels suggest, so confirm before
    soldering. Getting it backwards is **harmless**: 3.3 V reverse is inside a typical 5 V LED
@@ -185,48 +200,78 @@ Vendor documentation agrees: the Inno-Maker `CAM-IMX296RAW` manual calls the pad
 
 ### 4.1 Trigger — MCU → 4 cameras (required)
 
-**5 wires and 4 resistors.** One TIM1 channel per camera, all four on the same counter — so the
-frame start is identical across cameras by construction, while each channel can carry its own
-exposure. No connection to camera ground anywhere.
+**5 wires. No external components at all.** The module's own `R4 = 200 Ω` sets the LED current, so
+the STM32 pins connect straight to the trigger pads. One TIM1 channel per camera, all four on the
+same counter — so the frame start is identical across cameras by construction, while each channel
+can carry its own exposure. No connection to camera ground anywhere.
 
 ```
-                    220R            LED
-  PE9  (P2-32) ----/\/\/\----->|----+            CSI-C
-  PE11 (P2-34) ----/\/\/\----->|----+            CSI-D
-  PE13 (P2-36) ----/\/\/\----->|----+            CSI-E
-  PE14 (P2-37) ----/\/\/\----->|----+            CSI-F
-                              anode |
+  PE9  (P2-32) -----------------> Trig+   CSI-C      If = (3.3 - 1.25) / 200
+  PE11 (P2-34) -----------------> Trig+   CSI-D         = 10.3 mA per camera
+  PE13 (P2-36) -----------------> Trig+   CSI-E      (200R is ON THE MODULE)
+  PE14 (P2-37) -----------------> Trig+   CSI-F
                                     |
-  GND  (P2-43) ---------------------+   common cathode return
+  GND  (P2-43) ---------------------+      common Trig- return
 ```
 
-| From (WeAct board) | Silkscreen | Header pin | → | To | Note |
-|---|---|---|---|---|---|
-| `TIM1_CH1` | **`E9`** | P2‑32 | → 220 Ω → | CSI‑**C** LED **anode** | |
-| `TIM1_CH2` | **`E11`** | P2‑34 | → 220 Ω → | CSI‑**D** LED anode | |
-| `TIM1_CH3` | **`E13`** | P2‑36 | → 220 Ω → | CSI‑**E** LED anode | |
-| `TIM1_CH4` | **`E14`** | P2‑37 | → 220 Ω → | CSI‑**F** LED anode | |
-| Ground | **`GND`** | P2‑43 | → | LED **cathode**, all four | tie the four cathodes together |
+| From (WeAct board) | Silkscreen | Header pin | → | To |
+|---|---|---|---|---|
+| `TIM1_CH1` | **`E9`** | P2‑32 | → | CSI‑**C** `Trig+` |
+| `TIM1_CH2` | **`E11`** | P2‑34 | → | CSI‑**D** `Trig+` |
+| `TIM1_CH3` | **`E13`** | P2‑36 | → | CSI‑**E** `Trig+` |
+| `TIM1_CH4` | **`E14`** | P2‑37 | → | CSI‑**F** `Trig+` |
+| Ground | **`GND`** | P2‑43 | → | `Trig−`, all four (tie together) |
 
-⚠ **Anode is the pad that conducted with the meter's red lead on it.** On the module measured here
-that was **`XTR−`**, with `XTR+` as the cathode — opposite to what the labels suggest, so check
-yours. Backwards is harmless (no frames, swap the wires), never damaging.
+4 × 10.3 mA = 41 mA total, spread across four pins — each well inside the STM32's 25 mA per-pin
+limit.
 
-**Resistor value.** `(3.3 V − 1.2 V) / 220 Ω = 9.5 mA` per LED, 38 mA total across four pins —
-inside the STM32's 25 mA-per-pin limit with margin. Use **220 Ω** to start.
+> ### ⚠ Do NOT add a series resistor at 3.3 V
+> The module already has `R4 = 200 Ω`. At 3.3 V that is *more* resistance than 20 mA would need
+> (`(3.3 − 1.25)/0.02 = 102 Ω`), so the input **cannot be overdriven from a 3.3 V rail** — and any
+> resistor you add only starves it. An extra 220 Ω would drop the current to 4.9 mA, roughly halving
+> it and making an already-slow optocoupler slower. External resistance is only needed at higher
+> supply voltages: the manual's own example is 12 V → 537.5 Ω total → 337.5 Ω external.
 
-- Need a faster opto? **150 Ω** gives 14 mA, still within per-pin limits.
-- **Never go below ~140 Ω** from 3.3 V — that is the per-pin ceiling.
-- Start high and work down. Adding resistance can never overdrive the LED; if the module turns out
-  to have its own series resistor, you will simply measure less current than expected and can drop
-  to 150 Ω.
+**Polarity.** The manual says `XTR (Trig+)` is the anode. A bench diode test on this rig suggested
+the opposite (`XTR−` conducting with the meter's red lead on it), and this module is not identical
+to the manual's board — it has `MAS`/`XVS`/`XHS` pads that one lacks. **Confirm per module** in
+diode mode: the anode is the pad that conducts with the red lead on it. Backwards is harmless — no
+frames, swap the two wires — never damaging.
 
-**Checking the actual current once wired:** measure DC volts across one 220 Ω resistor while
-triggering. `I = V / 220`. Expect ~2.1 V for 9.5 mA; much less means the module has its own series
-resistor.
+**Checking the current once wired:** you cannot measure across R4 (it is on the module), so measure
+the pin voltage instead. With a channel asserted, `PE9`→`GND` should sit near 3.3 V minus very
+little; the current is then `(3.3 − 1.25 − V_pin_drop)/200`. Simpler: confirm the module responds,
+and calibrate timing with `skew`.
 
-**Only wiring one camera to start?** Sensible. Use `E9` (CH1) — the firmware drives all four
-channels identically until you set a per-channel exposure, so the other three simply go nowhere.
+### 4.1b Optional — 5 V drive for a faster optocoupler
+
+The TLP281's switching speed improves substantially with forward current. If `skew` calibration
+shows the lag is hurting short exposures, drive the LEDs from 5 V instead:
+
+```
+    +5V (WeAct P2-42, or M110 J22 pin 1)
+     |
+     +----+----+----+----+          If = (5 - 1.25 - 0.2) / 200
+     |    |    |    |                  = 17.8 mA   (near the manual's
+   Trig+ x4 (C, D, E, F)                            recommended 20 mA)
+     |    |    |    |
+   Trig- x4 -------+
+                   |
+               Collector
+             2N2222 (verify pinout in diode mode - TO-92 varies)
+  PE9 --[1k]-- Base
+               Emitter
+                   |
+                  GND   (same ground as that +5V)
+```
+
+Still **no LED series resistors** — R4 does that job at 5 V too. Trade-offs versus §4.1: one
+transistor switches all four LEDs together, so **all four cameras share one exposure**, and you lose
+the per-channel `exp <ch>` capability. Add a 10 kΩ base→emitter resistor to hold the transistor off
+while the GPIO floats during reset.
+
+Four transistors (one per channel) would give both faster switching *and* per-camera exposure, at
+the cost of four more parts.
 
 ### 4.2 Serial control link — MCU ↔ TX2 (optional, 3 nets)
 
@@ -289,8 +334,8 @@ cameras, so no ground loops and no star-point discipline to get right.
   < 30 cm. An LED loop is low-impedance and not especially noise-sensitive, but a twisted pair also
   stops *it* radiating into the CSI harness.
 - **Keep it away from the CSI FFCs**, which are the noisiest thing on the carrier.
-- **Resistors at the MCU end**, so the long run carries current rather than sitting between the
-  resistor and the LED.
+- **No series resistors** — the module's own `R4 = 200 Ω` sets the current (§4.1). Only a supply
+  above ~3.3 V needs external resistance.
 - **`PE11`/`PE13`/`PE14` are shared with the on-board TFT-LCD header.** Fine here — the LCD is not
   fitted — but do not populate both.
 
@@ -327,8 +372,8 @@ Each step is reversible and fails loudly rather than silently.
 3. **Check a channel before it meets a camera.** A DMM on DC across `PE9`→`GND` reads the average:
    at 30 fps / 5 ms with the default active-high polarity that is `3.3 × 0.15 ≈ 0.5 V`. Reading
    ~2.8 V instead means the polarity is inverted — fix with `pol` before wiring.
-4. **Wire one camera first** (§4.1), cameras still free-running (`trigger_mode=0`). Measure DC volts
-   across its 220 Ω resistor while triggering: ~2.1 V ⇒ ~9.5 mA, as intended.
+4. **Wire one camera first** (§4.1) — two wires, no components — cameras still free-running
+   (`trigger_mode=0`).
 5. **Enable trigger mode** and confirm that one camera still delivers frames:
    `echo 1 | sudo tee /sys/module/imx296/parameters/trigger_mode`, then restart capture. `dmesg`
    must show `EXTERNAL TRIGGER`.
@@ -366,8 +411,7 @@ capture. No reboot, no reflash, no DTB change.
 | `XTR−` ↔ GND, `XTR+` ↔ GND, powered | **both OL** → input is galvanically isolated | 2026‑08‑25 |
 | LED polarity | red lead on `XTR−` conducts ⇒ **`XTR−` = anode** (confirm per module) | 2026‑08‑25 |
 | **Free-running baseline** — worst skew **2.43 ms**, drift **8.33 µs/s** over 20 s, 4× IMX296 @ 30.01 fps | **measured** | 2026‑08‑25 |
-| Optocoupler part number | _pending_ | |
-| LED current (V across 220 Ω ÷ 220) | _pending_ | |
+| Optocoupler part number | **TLP281**, per the vendor manual; on-module `R4 = 200 Ω` ⇒ 10.3 mA at 3.3 V, no external resistor | 2026‑08‑25 |
 | Working polarity (`pol 0` or `1`) | _pending_ | |
 | `skew` calibration | _pending_ | |
 | Triggered inter-camera spread | _pending_ | |
