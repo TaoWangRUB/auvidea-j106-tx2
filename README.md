@@ -1014,6 +1014,19 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
   | Arducam **IMX219** (was) | 43.4 | 85.3 | 55.2 | 1.97 | 1.55 | **97 %** |
   | INNO‑MAKER **IMX296** (now) | 50.0 | 44.0 | 41.4 | 0.88 | 1.06 | **12 %** |
 
+  Measured on **all four ports** with the IMX296 tuning (AE clamp gain 1–8 / dgain 1–2):
+
+  | Port | R | G | B | G/R | G/B | imbalance |
+  |---|---|---|---|---|---|---|
+  | C `2-001a` | 53.9 | 46.2 | 42.4 | 0.86 | 1.09 | 27 % |
+  | D `2-0018` | 69.9 | 61.2 | 56.7 | 0.88 | 1.08 | 23 % |
+  | E `7-001a` | 84.7 | 70.8 | 65.9 | 0.84 | 1.07 | 28 % |
+  | F `7-0018` | 79.1 | 67.4 | 64.3 | 0.85 | 1.05 | 23 % |
+
+  The residual warm cast is **uniform across all four cameras** (G/R 0.84–0.88, G/B 1.05–1.09), so it
+  is a property of the tuning rather than per-module variation — meaning **one** correction serves all
+  four. Brightness-preserving gains from the four-port mean: **R ×0.897, G ×1.049, B ×1.126**.
+
   The old numbers are almost exactly a raw Bayer sensor's native channel ratios — AWB was applying
   unity gains and never converging, because the `awb` gray‑line / CCT constants
   (`awb.GrayLineSlope`, `awb.UtoCCT`, …) were IMX219 colour‑response measurements. That is also why

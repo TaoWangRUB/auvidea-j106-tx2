@@ -4,7 +4,7 @@
 - [x] 1.2 Make the tuning selectable and reversible (`ISP_FILE` in `deploy-j106.sh`; previous file preserved on the board)
 - [x] 1.3 Bound Argus auto-exposure so gain cannot pin at maximum (`ARGUS_EXP`/`ARGUS_GAIN`/`ARGUS_DGAIN`)
 - [x] 1.4 Record the negative results so they are not retried: full-strength Pi CCM (21 % → 45 %), `ae.PerChannelGainAdjustment` inert, `ae.MeanAlg.*Target` inert while AE is clamped
-- [ ] 1.5 Re-run the neutral-scene channel-ratio measurement on **all four** ports (only port F has been measured) and record per-port figures
+- [x] 1.5 Re-run the neutral-scene channel-ratio measurement on **all four** ports — done: C 27 %, D 23 %, E 28 %, F 23 %, with G/R 0.84–0.88 and G/B 1.05–1.09 on every port. The cast is **uniform across all four cameras**, so it is a tuning property, not per-module variation, and one correction serves all four
 
 ## 2. Spec brought up to date with the hardware
 
