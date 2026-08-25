@@ -929,25 +929,33 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open / hardware‑limited
-- **IMX296 ISP colour tuning** — Argus output from the IMX296 has a strong green/cyan cast.
-  `/var/nvidia/nvcam/settings/camera_overrides.isp` is **Arducam IMX219 tuning** applied to every
-  sensor (the file is global, not per-sensor) and **no public IMX296 tuning file exists** — the
-  IMX296 projects on GitHub are all drivers, and NVIDIA does not document the ISP.
-  Measured on a neutral scene: **G/R = 1.97, G/B = 1.55**, i.e. almost exactly a raw Bayer sensor's
-  native channel ratios — AWB is effectively applying **unity gains**, so what you see is the
-  sensor's unbalanced raw response. That is why `wbmode` makes no difference: the AWB gray-line /
-  CCT constants in the file (`awb.GrayLineSlope`, `awb.UtoCCT`, `awb.MIREDtoU`, …) are IMX219
-  colour-response measurements and simply do not fit IMX296 data, so AWB never converges.
-  Two further IMX219-specific mismatches are visible in the same file:
-  `lensShading.imageWidth/Height = 3280x2464` (IMX219 full res, vs the IMX296's 1456×1088) and
-  `opticalBlack.manualBias* = 64` (the IMX296's BLKLEVEL is 60). **Tested:** correcting all three —
-  lens-shading geometry, black level, and disabling `awb.nightmode` — did **not** remove the cast,
-  confirming it lives in the AWB/CCM calibration. Reverted, since the file is shared with the
-  IMX219 ports.
-  **Practical workaround** until a real tuning exists: apply per-channel gains downstream —
-  **R ×1.41, G ×0.72, B ×1.11** (brightness-preserving) neutralises the measured cast. Raw V4L2
-  data is unaffected and correct (BGGR, black level ~60), so anything consuming RAW rather than
-  Argus is fine.
+- ~~**IMX296 ISP colour tuning**~~ — **SOLVED 2026‑08‑25.** A public IMX296 tuning exists after all,
+  inside INNO‑MAKER's Jetson Orin binary package
+  (`github.com/INNO-MAKER/cam-imx296raw-trigger`, `1-1jetson_orin_nano_driver/5.15.148/…tar.gz`,
+  path `isp/camera_overrides.isp`). It is *not* in any repo tree — only inside that tarball, which is
+  why a file search misses it. Vendored here as
+  [`tools/nvcam-settings/camera_overrides.imx296.isp`](tools/nvcam-settings/camera_overrides.imx296.isp)
+  and installed by default by `deploy-j106.sh` (`ISP_FILE=` to override).
+
+  Measured on a neutral scene, port F, identical exposure settings:
+
+  | Tuning | R | G | B | G/R | G/B | max cast |
+  |---|---|---|---|---|---|---|
+  | Arducam **IMX219** (was) | 43.4 | 85.3 | 55.2 | 1.97 | 1.55 | **97 %** |
+  | INNO‑MAKER **IMX296** (now) | 50.0 | 44.0 | 41.4 | 0.88 | 1.06 | **12 %** |
+
+  The old numbers are almost exactly a raw Bayer sensor's native channel ratios — AWB was applying
+  unity gains and never converging, because the `awb` gray‑line / CCT constants
+  (`awb.GrayLineSlope`, `awb.UtoCCT`, …) were IMX219 colour‑response measurements. That is also why
+  `wbmode` had no effect. The IMX296 file carries its own AWB constants and the correct
+  `opticalBlack` bias of **60** (the IMX296's `BLKLEVEL`; the IMX219 file says 64).
+
+  ⚠️ Caveats worth knowing: the file's own header calls it *"experimental candidate v0.2c … **not
+  production tuning**"* — it is derived from RidgeRun's **IMX477** tuning with the CCM mapped from
+  Raspberry Pi's IMX296 libcamera JSON (daylight, 5600 K) and the IMX477 lens‑shading tables
+  removed. So expect residual vignetting and a slight warm tint; it is a large improvement, not a
+  calibration. And `camera_overrides.isp` is **global — one tuning for all sensors** — so a mixed
+  IMX219 + IMX296 board cannot have both correct at once.
 - **IMX296 Argus auto-exposure is unusable unmarshalled** — left alone, AE pins **both** gain
   (479/480 = 47.9 dB) and exposure (SHS1=0, full-frame 33 ms) to maximum and still exposes for the
   highlights, burying the image in chroma noise. This is the AE half of the same wrong tuning.

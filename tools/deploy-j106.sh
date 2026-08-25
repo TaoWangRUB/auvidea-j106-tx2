@@ -16,6 +16,7 @@
 #   SSHOPTS  extra ssh opts             (e.g. -o ProxyJump=user@jump-host)
 #   SUDOPW   board sudo password        (default: nvidia)
 #   LABEL    extlinux label / suffix    (default: j106)
+#   ISP_FILE Argus tuning to install    (default: camera_overrides.imx296.isp)
 #
 # NOTE on this project's specific access (jump host needs a password): the simplest
 # path is to run this FROM the jump host (where the board is directly reachable), or
@@ -29,6 +30,11 @@ TARGET=${TARGET:-nvidia@10.42.0.157}
 SSHOPTS=${SSHOPTS:-}
 SUDOPW=${SUDOPW:-nvidia}
 LABEL=${LABEL:-j106}
+# Argus ISP tuning. The file is GLOBAL (one tuning for every sensor), so pick the
+# one matching what is actually populated. Defaults to the IMX296 tuning because
+# ports C-F carry IMX296 as of 2026-08-25; set ISP_FILE=camera_overrides.isp for
+# the Arducam IMX219 tuning if IMX219 modules are refitted.
+ISP_FILE=${ISP_FILE:-camera_overrides.imx296.isp}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 put(){ ssh $SSHOPTS "$TARGET" "cat > /tmp/$2" < "$1" && echo "   pushed $2"; }
@@ -36,7 +42,7 @@ put(){ ssh $SSHOPTS "$TARGET" "cat > /tmp/$2" < "$1" && echo "   pushed $2"; }
 echo ">> pushing artifacts to $TARGET ..."
 put "$IMAGE"                                    "Image.$LABEL"
 put "$DTB"                                      "$LABEL.dtb"
-put "$HERE/nvcam-settings/camera_overrides.isp" "camera_overrides.isp"
+put "$HERE/nvcam-settings/$ISP_FILE"                 "camera_overrides.isp"
 put "$HERE/j106-recovery-key.py"                "j106-recovery-key.py"
 put "$HERE/j106-recovery-key.service"           "j106-recovery-key.service"
 put "$HERE/j106-install.sh"                     "j106-install.sh"
