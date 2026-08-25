@@ -305,6 +305,14 @@ without a reboot. If the kernel itself is at fault, select the previous `extlinu
 established recovery path, including from the U-Boot menu over `/dev/ttyUSB0` if the board will not
 boot.
 
+## Follow-on
+
+Camera↔IMU time alignment is a separate capability, specified in **`add-camera-imu-sync`**. The
+relevant consequence of *this* design is that a hardware-periodic trigger turns the camera↔IMU time
+offset from a drifting unknown into a single stable constant — which is what makes that change
+tractable. Verified while scoping it: V4L2 buffer timestamps here are `CLOCK_MONOTONIC`
+(flags `0x2001`), so no clock conversion is needed on the camera side.
+
 ## Open Questions
 
 - Which `/dev/ttyTHS*` the M110 `J22` header maps to. Deferred safely: the serial link is optional

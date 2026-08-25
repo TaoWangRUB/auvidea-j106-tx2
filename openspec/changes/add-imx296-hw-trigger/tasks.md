@@ -102,3 +102,9 @@
 - [x] 8.4 Design: new D9 (the measurement and what it changed), D10 (runtime `pol`/`skew`), and
       D6 revised from one channel to four
 - [x] 8.5 Update proposal, README Stage 8 + status, firmware README, `tools/README.md`, `j106-trigctl.py`
+
+## 9. Follow-on
+
+- [ ] 9.1 Camera↔IMU time alignment is tracked separately in the **`add-camera-imu-sync`** change —
+      it depends on this one for the periodic frame clock, but the IMU half can be built and tested
+      before the trigger is wired
