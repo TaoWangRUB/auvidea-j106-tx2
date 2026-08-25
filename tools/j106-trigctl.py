@@ -3,8 +3,13 @@
 
 Talks the line protocol of the STM32H7 firmware in hw-trigger/firmware/ over a
 plain serial port. The generator owns the frame rate AND the exposure: in the
-IMX296's Fast Trigger mode the XTRIG low pulse width IS the exposure time, so
-the sensor's own exposure control does nothing while triggered.
+IMX296's Fast Trigger mode the asserted pulse width IS the exposure time, so the
+sensor's own exposure control does nothing while triggered.
+
+The camera modules' trigger inputs are optocouplers isolated from module ground,
+so two firmware commands exist for what that barrier hides -- `pol` (does driving
+the LED assert the trigger, or release it?) and `skew` (the opto's on/off delay
+asymmetry, which lands straight on exposure). Reach both with `raw`.
 
   >>> RUNS EITHER SIDE. <<<   Wherever the serial link is: on the board if the
   MCU is wired to M110 J22 (a /dev/ttyTHS*), on the build host if it is on a
@@ -15,9 +20,11 @@ the sensor's own exposure control does nothing while triggered.
   ./j106-trigctl.py start
   ./j106-trigctl.py burst 300
   ./j106-trigctl.py stop
-  ./j106-trigctl.py raw 'exp 2000'
+  ./j106-trigctl.py raw 'exp 2 3000'    # per-camera exposure, ch 1..4
+  ./j106-trigctl.py raw 'pol 0'
+  ./j106-trigctl.py raw 'skew 8000'
 
-Wiring, level translation and bring-up order: hw-trigger/WIRING.md
+Wiring, resistor values and bring-up order: hw-trigger/WIRING.md
 """
 import argparse
 import sys
@@ -111,7 +118,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="report clock, period, exposure, pulse count")
     sub.add_parser("start", help="start triggering")
-    sub.add_parser("stop", help="stop; the line is parked idle-high")
+    sub.add_parser("stop", help="stop; every channel parks unasserted")
     sub.add_parser("help", help="ask the firmware for its own command list")
 
     p = sub.add_parser("fps", help="set frame rate (and optionally exposure)")

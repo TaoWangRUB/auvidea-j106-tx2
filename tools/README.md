@@ -25,13 +25,17 @@ To boot back out of recovery, tap **Reset** (without holding recovery).
 (a `/dev/ttyTHS*`), on the build host if it is on a USB-serial dongle (`/dev/ttyUSB*`).
 It never touches the cameras.
 
-The generator owns both the frame rate **and the exposure**: in the IMX296's Fast Trigger
-mode the `XTRIG` low pulse width *is* the exposure time, so the sensor's own exposure
-control does nothing while triggered.
+The generator owns both the frame rate **and the exposure**: in the IMX296's Fast Trigger mode the
+asserted pulse width *is* the exposure time, so the sensor's own exposure control does nothing while
+triggered. The camera modules' trigger inputs are optocouplers, so two of the commands (`pol`,
+`skew`) exist to correct for what the isolation barrier hides — see `hw-trigger/WIRING.md` §3.
 
 ```bash
 ./j106-trigctl.py --port /dev/ttyUSB0 status
 ./j106-trigctl.py fps 30 --exposure 5000     # 30 fps, 5 ms exposure
+./j106-trigctl.py raw 'exp 2 3000'           # camera 2 only, 3 ms
+./j106-trigctl.py raw 'pol 0'                # invert, if no frames arrive
+./j106-trigctl.py raw 'skew 8000'            # remove 8 us of optocoupler lag
 ./j106-trigctl.py start
 ./j106-trigctl.py burst 300                  # 300 pulses, then stop
 ./j106-trigctl.py stop

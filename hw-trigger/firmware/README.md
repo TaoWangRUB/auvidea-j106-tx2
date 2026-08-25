@@ -1,25 +1,29 @@
 # camtrig — IMX296 trigger generator firmware
 
-Bare-metal STM32H743 firmware for a **WeAct MiniSTM32H7xx**. Generates the `XTRIG` waveform
-that hardware-synchronises the four IMX296 on the J106/TX2 rig.
+Bare-metal STM32H743 firmware for a **WeAct MiniSTM32H7xx**. Generates the trigger waveform that
+hardware-synchronises the four IMX296 on the J106/TX2 rig.
 
-Wiring, level translation and bring-up order: [`../WIRING.md`](../WIRING.md).
+Wiring, resistor values and bring-up order: [`../WIRING.md`](../WIRING.md).
 
 ## What it does
 
-`TIM1_CH1` on **`PE9`** (header **P2‑32**) in inverted PWM: idle **high**, one active-**low**
-pulse per frame. In the IMX296's Fast Trigger mode the low pulse width *is* the exposure
-(`t_exp = t_low + 14.26 µs`), so the pulse is produced entirely by timer hardware — never by
-a software loop.
+`TIM1_CH1..CH4` on **`PE9` / `PE11` / `PE13` / `PE14`** (header P2‑32/34/36/37), one channel per
+camera, all four on **one counter** — so the frame start is identical across cameras by
+construction while each channel can carry its own exposure.
 
-It starts triggering on power-up with compiled-in defaults (**30 fps, 5 ms**), so the rig
-works with **two wires and no host attached**. The serial link only exists to change
-parameters at runtime.
+The camera modules' trigger inputs are **optocoupler LEDs isolated from module ground** (measured —
+see [`../WIRING.md`](../WIRING.md) §3), so each pin sources ~9.5 mA through a 220 Ω resistor into an
+LED whose cathode returns to *this* board's ground. In the IMX296's Fast Trigger mode the asserted
+pulse width *is* the exposure (`t_exp = t_pulse + 14.26 µs`), so the pulse is produced entirely by
+timer hardware — never by a software loop.
+
+It starts triggering on power-up with compiled-in defaults (**30 fps, 5 ms**), so the rig works with
+**no host attached**. The serial link only exists to change parameters at runtime.
 
 ## Build
 
 ```bash
-make            # -> build/camtrig.bin   (~3.9 kB)
+make            # -> build/camtrig.bin   (~5 kB)
 ```
 
 Needs `arm-none-eabi-gcc` only. Builds with `-Wall -Wextra -Werror`; no HAL, no CMSIS, no
@@ -44,8 +48,11 @@ Replies end `ok` or `err <reason>`. Driven by [`tools/j106-trigctl.py`](../../to
 |---|---|
 | `fps <v>` | frame rate, e.g. `30` or `59.94` |
 | `period <us>` | frame period directly |
-| `exp <us>` | exposure; the firmware subtracts the sensor's 14.26 µs offset |
-| `start` / `stop` | `stop` parks the line idle-high, never mid-pulse |
+| `exp <us>` | exposure, all four cameras |
+| `exp <ch> <us>` | exposure for one camera, `ch` = 1..4 |
+| `pol <0\|1>` | `1` (default) = the pulse turns the LED **on**. Use `0` if the module asserts on LED *off* |
+| `skew <ns>` | the optocoupler's on/off delay asymmetry, removed from the pulse alongside the sensor's 14.26 µs |
+| `start` / `stop` | `stop` parks every channel unasserted, never mid-pulse |
 | `burst <n>` | emit `n` pulses then stop |
 | `status` | `key=value` report |
 | `help` | command list |
@@ -76,6 +83,14 @@ reason**, not silently clamped into a waveform that stalls capture:
 - period shorter than `tTGPD` (1126 H = 16.6815 ms → **max 59.95 fps**)
 - exposure below ~14.31 µs (`tTGSE` + `tOFFSET`)
 - exposure leaving less than 1 ms of readout margin before the next trigger
+
+**Two runtime knobs for the optocoupler.** Neither the *sense* of the pulse (does driving the LED
+assert `XTRIG` or release it?) nor its transport delay can be determined from this side of an
+isolation barrier. Guess-reflash-guess would turn a two-second experiment into a build cycle during
+exactly the bring-up step where iteration matters, so both are serial commands. The `pol` default is
+idle-LED-off — the state that cannot leave a sensor held inside an exposure.
+
+**Pins idle with a pull-down**, so a board in reset or unplugged leaves the optos dark.
 
 **No interrupts.** The waveform is hardware; the command loop polls. There is no ISR to get
 wrong, and no timing that depends on firmware responsiveness.
