@@ -24,6 +24,9 @@ as the source of truth when state changes.
 | `tx2-j106-6csi/override-usb.dtsi` | USB VBUS fix — forces the fixed regulator always-on so xusb_padctl stops deferring on the absent devkit `pca953x` expander. |
 | `tx2-j106-6csi/build-dtb.sh` | DTB build helper (Approach B: cpp + dtc from NVIDIA DTS sources). |
 | `patches/0001-imx219-share-reset-gpio-j106.patch` | Kernel driver patch so all 6 sensors can share the J106's single hardware reset line. |
+| `patches/0002-imx296-tegracam-j106.patch` | New tegracam IMX296 driver (R32.7.6 ships none). |
+| `patches/0003-imx296-external-trigger-j106.patch` | IMX296 Fast Trigger mode — `trigger_mode` module param, no DT change. |
+| `hw-trigger/` | Hardware frame trigger: `WIRING.md` (diagram, the ⚠ 1.8 V level gate, bring-up order) + `firmware/` (bare-metal STM32H7 `TIM1_CH1` pulse generator, built with `arm-none-eabi-gcc`, flashed by `dfu-util`). |
 | `headless-first-boot-setup.md` | NVIDIA oem-config first-boot over micro-USB serial — required before any DTB work on a freshly-flashed board. |
 | `*.pdf` | Auvidea/NVIDIA hardware references (J106, M110, XCB-Lite, TX1 flashing). |
 | `j106build/` | **git-ignored** build tree: L4T sources, toolchain, kernel build output, DTBs. Reproducible; do not commit. |
@@ -131,6 +134,15 @@ rate (patch `0001`, marginal-link margin, matches Auvidea TX1), all-5-modes in d
 framerates (Argus ISP), and **unique `position` per module** (the Argus `sensor-id` aliasing fix —
 identical EEPROM-less IMX219 all collapsed to `(GUID 0, position 0)` → one camera). Deliverable:
 `captures/tx2_grid_5cam.mp4` (5-camera 2×3 grid, TX1 parity).
+
+**Hardware trigger (README §5 Stage 8, §7):** software all built and verified — patch `0003`
+compiles and the `Image` is rebuilt, STM32H7 firmware builds, and `tools/j106-sync-check.py` has
+measured the free-running baseline on the live board (worst inter-camera skew **2.43 ms**, drift
+**8.33 µs/s**). **Blocked only on two wires** from the STM32H7 `PE9` to the modules' `XTR+`/`XTR−`.
+The TX2 cannot source the trigger: no PWM-capable pad is free on this carrier, and in Fast Trigger
+mode the pulse width *is* the exposure, so GPIO jitter becomes brightness noise. ⚠ `XTRIG` is a
+**1.8 V** input with a **3.3 V absolute maximum** — `hw-trigger/WIRING.md` §3 is a mandatory
+measurement gate before connecting anything.
 
 **Open issues (README §7):** (1) micro-USB device-mode (`/dev/ttyACM0` gadget, *not* `ttyS0`) not
 enumerating — staged `override-usb.dtsi` `mode="device"` fix unverified; (2) carrier buttons not
