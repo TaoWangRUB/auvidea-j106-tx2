@@ -950,6 +950,26 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
   `wbmode` had no effect. The IMX296 file carries its own AWB constants and the correct
   `opticalBlack` bias of **60** (the IMX296's `BLKLEVEL`; the IMX219 file says 64).
 
+  **Can the Raspberry Pi tuning be reused directly?** Partly — and it is already the ultimate source.
+  Pi's libcamera IMX296 tuning
+  (`raspberrypi/libcamera:src/ipa/rpi/{vc4,pisp}/data/imx296.json`) is a real Sony/RPi calibration
+  containing **7 CCMs across 2500–7400 K**, a 7-point AWB ct-curve, black level 3840 (= 60 << 6,
+  matching the datasheet's `BLKLEVEL`), a noise model and ALSC tables. But it does not transplant
+  wholesale:
+  - **NVIDIA's format holds exactly ONE CCM** (`colorCorrection.srgbMatrix[0..2]`) with no
+    colour-temperature indexing, so 6 of Pi's 7 matrices have nowhere to go.
+  - **The vendor CCM is provably Pi's 5600 K matrix damped 50 % toward identity** — verified
+    numerically to 3 decimal places on all 9 coefficients. **Tested the full-strength Pi matrix:
+    it is worse** (channel imbalance 21 % → 45 %, strong magenta cast, over-saturated blues),
+    because a CCM is applied *after* white balance and amplifies the residual AWB error. The
+    damping is a deliberate, correct compromise — kept.
+  - **ALSC / lens shading cannot transfer at all**: Pi's tables are calibrated for the Pi GS
+    camera's lens, while the J106 modules carry a fisheye. This is why the vendor stripped the
+    lens-shading tables, and why residual vignetting remains.
+  - Pi's AWB ct-curve *could* in principle be remapped onto NVIDIA's gray-line/CCT constants
+    (`awb.UtoCCT`, `awb.GrayLineSlope`, `awb.v4.FusionLights`), which is where the remaining ~12–21 %
+    imbalance lives — that is the actual remaining work, and it needs a colour target to validate.
+
   ⚠️ Caveats worth knowing: the file's own header calls it *"experimental candidate v0.2c … **not
   production tuning**"* — it is derived from RidgeRun's **IMX477** tuning with the CCM mapped from
   Raspberry Pi's IMX296 libcamera JSON (daylight, 5600 K) and the IMX477 lens‑shading tables
