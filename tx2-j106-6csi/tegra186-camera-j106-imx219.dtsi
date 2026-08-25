@@ -377,7 +377,7 @@
 					status = "okay";
 					j106_vi_in2: endpoint {
 						port-index = <2>;	/* CSI_C */
-						bus-width = <2>;
+						bus-width = <1>;	/* IMX296: single lane */
 						remote-endpoint = <&j106_csi_out2>;
 						status = "okay";
 					};
@@ -387,7 +387,7 @@
 					status = "okay";
 					j106_vi_in3: endpoint {
 						port-index = <3>;	/* CSI_D */
-						bus-width = <2>;
+						bus-width = <1>;	/* IMX296: single lane */
 						remote-endpoint = <&j106_csi_out3>;
 						status = "okay";
 					};
@@ -397,7 +397,7 @@
 					status = "okay";
 					j106_vi_in4: endpoint {
 						port-index = <4>;	/* CSI_E */
-						bus-width = <2>;
+						bus-width = <1>;	/* IMX296: single lane */
 						remote-endpoint = <&j106_csi_out4>;
 						status = "okay";
 					};
@@ -484,8 +484,8 @@
 						status = "okay";
 						j106_csi_in2: endpoint@4 {
 							port-index = <2>;
-							bus-width = <2>;
-							remote-endpoint = <&j106_imx219_out2>;
+							bus-width = <1>;	/* IMX296: single lane */
+							remote-endpoint = <&j106_imx296_out2>;
 							status = "okay";
 						};
 					};
@@ -510,8 +510,8 @@
 						status = "okay";
 						j106_csi_in3: endpoint@6 {
 							port-index = <3>;
-							bus-width = <2>;
-							remote-endpoint = <&j106_imx219_out3>;
+							bus-width = <1>;	/* IMX296: single lane */
+							remote-endpoint = <&j106_imx296_out3>;
 							status = "okay";
 						};
 					};
@@ -536,8 +536,8 @@
 						status = "okay";
 						j106_csi_in4: endpoint@8 {
 							port-index = <4>;
-							bus-width = <2>;
-							remote-endpoint = <&j106_imx219_out4>;
+							bus-width = <1>;	/* IMX296: single lane */
+							remote-endpoint = <&j106_imx296_out4>;
 							status = "okay";
 						};
 					};
@@ -665,44 +665,40 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		imx219_c@10 {
-			IMX219_HW_RESOURCES
-			reg = <0x10>;
-			mode0 { IMX219_MODE0("serial_c") };
-			mode1 { IMX219_MODE1("serial_c") };
-			mode2 { IMX219_MODE2("serial_c") };
-			mode3 { IMX219_MODE3("serial_c") };
-			mode4 { IMX219_MODE4("serial_c") };
+		/* CSI-C: IMX296 global shutter, north (native 0x1a) of the pair (see the reg note
+		 * on imx296_f@18 for why these addresses look the way they do). */
+		imx296_c@1a {
+			IMX296_HW_RESOURCES
+			reg = <0x1a>;
+			mode0 { IMX296_MODE0("serial_c") };
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
 				port@0 {
 					reg = <0>;
-					j106_imx219_out2: endpoint {
+					j106_imx296_out2: endpoint {
 						port-index = <2>;
-						bus-width = <2>;
+						bus-width = <1>;
 						remote-endpoint = <&j106_csi_in2>;
 					};
 				};
 			};
 		};
 
-		imx219_d@12 {
-			IMX219_HW_RESOURCES
-			reg = <0x12>;
-			mode0 { IMX219_MODE0("serial_d") };
-			mode1 { IMX219_MODE1("serial_d") };
-			mode2 { IMX219_MODE2("serial_d") };
-			mode3 { IMX219_MODE3("serial_d") };
-			mode4 { IMX219_MODE4("serial_d") };
+		/* CSI-D: IMX296 global shutter, south (0x1a shifted to 0x18) of the pair (see the reg note
+		 * on imx296_f@18 for why these addresses look the way they do). */
+		imx296_d@18 {
+			IMX296_HW_RESOURCES
+			reg = <0x18>;
+			mode0 { IMX296_MODE0("serial_d") };
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
 				port@0 {
 					reg = <0>;
-					j106_imx219_out3: endpoint {
+					j106_imx296_out3: endpoint {
 						port-index = <3>;
-						bus-width = <2>;
+						bus-width = <1>;
 						remote-endpoint = <&j106_csi_in3>;
 					};
 				};
@@ -716,37 +712,26 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		imx219_e@10 {
-			IMX219_HW_RESOURCES
-			reg = <0x10>;
-			mode0 { IMX219_MODE0("serial_e") };
-			mode1 { IMX219_MODE1("serial_e") };
-			mode2 { IMX219_MODE2("serial_e") };
-			mode3 { IMX219_MODE3("serial_e") };
-			mode4 { IMX219_MODE4("serial_e") };
+		/* CSI-E: IMX296 global shutter, north (native 0x1a) of the pair (see the reg note
+		 * on imx296_f@18 for why these addresses look the way they do). */
+		imx296_e@1a {
+			IMX296_HW_RESOURCES
+			reg = <0x1a>;
+			mode0 { IMX296_MODE0("serial_e") };
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
 				port@0 {
 					reg = <0>;
-					j106_imx219_out4: endpoint {
+					j106_imx296_out4: endpoint {
 						port-index = <4>;
-						bus-width = <2>;
+						bus-width = <1>;
 						remote-endpoint = <&j106_csi_in4>;
 					};
 				};
 			};
 		};
 
-		/* CSI-F: IMX296 global shutter.
-		 *
-		 * reg = 0x18 and not 0x34: the IMX296 answers at TWO addresses -
-		 * a SLAMODE-strapped one (0x36 here, so this module straps
-		 * SLAMODE=0) and a common one (0x1a) that is valid in both
-		 * SLAMODE polarities. The carrier's address shifter XORs address
-		 * bit 1, mapping them to 0x34 and 0x18 respectively. Using the
-		 * common address keeps this node correct if the module is ever
-		 * swapped for a differently-strapped one. */
 		imx296_f@18 {
 			IMX296_HW_RESOURCES
 			reg = <0x18>;
@@ -780,8 +765,8 @@
 	tegra-camera-platform {
 		compatible = "nvidia, tegra-camera-platform";
 
-		/* 5 x IMX219 x 2 lanes + 1 x IMX296 x 1 lane = 11 lanes total */
-		num_csi_lanes = <11>;
+		/* 2 x IMX219 (A/B) x 2 lanes + 4 x IMX296 (C-F) x 1 lane = 8 lanes total */
+		num_csi_lanes = <8>;
 		max_lane_speed = <1500000>;
 		min_bits_per_pixel = <10>;
 		vi_peak_byte_per_pixel = <2>;
@@ -827,14 +812,14 @@
 			};
 			module2 {
 				status = "okay";
-				badge = "imx219_centerleft_csic";
+				badge = "imx296_centerleft_csic";
 				position = "centerleft";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
 					pcl_id = "v4l2_sensor";
-					devname = "imx219 2-0010";
-					proc-device-tree = "/proc/device-tree/i2c@3180000/imx219_c@10";
+					devname = "imx296 2-001a";
+					proc-device-tree = "/proc/device-tree/i2c@3180000/imx296_c@1a";
 				};
 				drivernode1 {
 					status = "okay";
@@ -844,14 +829,14 @@
 			};
 			module3 {
 				status = "okay";
-				badge = "imx219_centerright_csid";
+				badge = "imx296_centerright_csid";
 				position = "centerright";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
 					pcl_id = "v4l2_sensor";
-					devname = "imx219 2-0012";
-					proc-device-tree = "/proc/device-tree/i2c@3180000/imx219_d@12";
+					devname = "imx296 2-0018";
+					proc-device-tree = "/proc/device-tree/i2c@3180000/imx296_d@18";
 				};
 				drivernode1 {
 					status = "okay";
@@ -861,14 +846,14 @@
 			};
 			module4 {
 				status = "okay";
-				badge = "imx219_bottomleft_csie";
+				badge = "imx296_bottomleft_csie";
 				position = "bottomleft";
 				orientation = "1";
 				drivernode0 {
 					status = "okay";
 					pcl_id = "v4l2_sensor";
-					devname = "imx219 7-0010";
-					proc-device-tree = "/proc/device-tree/i2c@c250000/imx219_e@10";
+					devname = "imx296 7-001a";
+					proc-device-tree = "/proc/device-tree/i2c@c250000/imx296_e@1a";
 				};
 				drivernode1 {
 					status = "okay";
