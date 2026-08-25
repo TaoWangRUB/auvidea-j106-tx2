@@ -740,9 +740,10 @@ removed its most dangerous part:
 - **No ground is shared** with the cameras — the LED cathode returns to the MCU's own ground.
 - But it needs **current, not voltage**: ~10 mA per LED, and four in parallel would be 40 mA from
   one pin, over the STM32's 25 mA per-pin limit. So it is **one channel per camera** —
-  `TIM1_CH1..CH4` on `PE9/PE11/PE13/PE14`, each through 220 Ω — all on **one counter**, so the frame
-  start stays identical across cameras by construction while each channel can carry its own
-  exposure. 5 wires, 4 resistors, no active parts.
+  `TIM1_CH1..CH4` on `PE9/PE11/PE13/PE14` — all on **one counter**, so the frame start stays
+  identical across cameras by construction while each channel can carry its own exposure. **5 wires
+  and no external components**: the vendor manual identifies the part as a **TLP281** with its own
+  **`R4 = 200 Ω`** on the module, giving 10.3 mA at 3.3 V. Adding a resistor only starves it.
 
 Two things the isolation hides, both runtime-settable in the firmware rather than compiled in:
 `pol` (whether driving the LED asserts `XTRIG` or releases it — unknowable from this side of the
@@ -1101,7 +1102,7 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
   - `tools/j106-sync-check.py` — **run on the live board**, and it is what produced the
     free-running baseline above (worst skew 2.43 ms, drift 8.33 µs/s).
   - **Trigger input characterised**: optocoupler, isolated (README §5 Stage 8). The level-shifting
-    risk is gone; the circuit is now 4 channels × 220 Ω plus a common return.
+    risk is gone; the circuit is 4 signal wires plus a common return, no external components.
   - **Missing: the wiring itself** — 5 wires and 4 resistors between the STM32H7
     (`PE9/PE11/PE13/PE14`) and the four modules' LED pads, and the firmware flashed over DFU.
   - Not deployed: the rebuilt `Image` has not been installed behind an `extlinux` LABEL yet, since

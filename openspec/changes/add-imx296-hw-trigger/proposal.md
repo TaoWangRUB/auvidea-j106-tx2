@@ -20,8 +20,8 @@ brightness. A WeAct MiniSTM32H7 already on hand generates the same pulse from a 
 - Add an **external hardware trigger path**: a WeAct MiniSTM32H7xx (STM32H743) drives the four
   camera modules' trigger inputs from `TIM1_CH1..CH4` (`PE9/PE11/PE13/PE14`), one channel per
   camera on a single shared counter. The modules' `XTR+`/`XTR−` pads turned out on measurement to
-  be an **optocoupler LED isolated from module ground**, so each channel supplies ~10 mA through a
-  series resistor and no ground is shared with the cameras.
+  be an **optocoupler (TLP281) isolated from module ground** with its own 200 Ω series resistor, so
+  each channel drives it directly at ~10.3 mA and no ground is shared with the cameras.
 - Add **firmware** (`hw-trigger/firmware/`): bare-metal STM32H7 trigger generator — four PWM
   channels on one counter, auto-prescaler, frame-rate and exposure limits derived from the
   datasheet, runtime `pol`/`skew` corrections for the optocoupler, and a line-based serial command
@@ -59,5 +59,6 @@ brightness. A WeAct MiniSTM32H7 already on hand generates the same pulse from a 
 - **Modified**: `patches/0002-imx296-tegracam-j106.patch` stays as-is; `0003` applies on top.
 - **Modified**: `README.md` (new stage section + status), `CLAUDE.md` (repo layout).
 - **Unchanged**: device tree. This change touches no `.dtsi`, so the deployed DTB is unaffected.
-- **Hardware**: 5 wires (4 LED anodes + 1 common cathode return) and 4× 220 Ω resistors. No shared
-  ground with the cameras. Optionally 3 more wires for the serial link to the M110 `J22` header.
+- **Hardware**: 5 wires (4 anodes + 1 common cathode return) and **no external components** — the
+  module carries its own 200 Ω LED resistor. No shared ground with the cameras. Optionally 3 more
+  wires for the serial link to the M110 `J22` header.
