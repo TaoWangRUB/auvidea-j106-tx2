@@ -1025,7 +1025,7 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
 
   The residual warm cast is **uniform across all four cameras** (G/R 0.84–0.88, G/B 1.05–1.09), so it
   is a property of the tuning rather than per-module variation — meaning **one** correction serves all
-  four. Brightness-preserving gains from the four-port mean: **R ×0.897, G ×1.049, B ×1.126**.
+  four. Brightness-preserving gains from the four-port mean (R 71.9, G 61.4, B 57.3): **R ×0.884, G ×1.035, B ×1.108**.
 
   The old numbers are almost exactly a raw Bayer sensor's native channel ratios — AWB was applying
   unity gains and never converging, because the `awb` gray‑line / CCT constants
