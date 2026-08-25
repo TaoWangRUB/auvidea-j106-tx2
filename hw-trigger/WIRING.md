@@ -136,21 +136,39 @@ Vendor documentation for this pad family (Inno-Maker `CAM-IMX296RAW` manual §4)
 
 ### 3.2 Measurements (multimeter, no scope needed)
 
-Do these on **one** module first, powered as normal, cameras free-running.
+Do these on **one** module first. **The cameras do not need to be streaming** — `XTRIG` is an
+*input*, so its idle level is set by whatever pulls it on the module, which depends only on the
+rails being up, not on whether the sensor is producing frames. Powered and idle is enough.
+
+#### Part 1 — board UNPOWERED
+
+Resistance and continuity inject a test current, so they are only meaningful with the rails down.
+Shut the board down cleanly (`sudo poweroff`), don't just pull the plug.
 
 | # | Measure | Expected | Meaning |
 |---|---|---|---|
-| 1 | `XTR−` ↔ board GND, continuity | ~0 Ω | `XTR−` is the ground return. **If not ~0 Ω, stop** — the pads may be an isolated/differential input and this guide does not cover that. |
-| 2 | `MAS` ↔ GND, DC volts | ~0 V | `XMASTER` is low = **master mode**, which Fast Trigger requires. It must already be low: the cameras free-run at 60 fps today, which is only possible in master mode. **If it reads high, stop and re-read the design doc** — the whole approach assumes master mode. |
-| 3 | `XTR+` ↔ GND, DC volts, idle | see below | **This is the gate.** |
+| 1 | `XTR−` ↔ board GND, continuity | ~0 Ω | `XTR−` is the ground return, as the vendor doc says. **If it is not ~0 Ω, stop** — the pads may be an isolated or differential input, which this guide does not cover. |
+| 2 | `XTR+` ↔ `3V3` pad, resistance | see below | Is there a pull-up, and to which rail? |
+| 3 | `XTR+` ↔ GND, resistance | see below | |
 
-**Reading from measurement 3:**
+#### Part 2 — board POWERED, cameras idle (no streaming)
 
-| Reading | Domain | Action |
-|---|---|---|
-| **~3.3 V** | pad is pulled to the board's 3.3 V rail → there is a buffer/shifter behind it | **Case A** below |
-| **~1.8 V** | pad is the raw sensor `XTRIG`, idling high on OVDD | **Case B** below |
-| **~0 V / floating** | no pull-up either way | Measure resistance `XTR+`→`3V3` and `XTR+`→GND with the board **unpowered**. A finite resistance to `3V3` (typ. 10 k) ⇒ Case A. Otherwise assume **Case B** — it is the safe assumption. |
+| # | Measure | Expected | Meaning |
+|---|---|---|---|
+| 4 | `MAS` ↔ GND, DC volts | ~0 V | `XMASTER` low = **master mode**, which Fast Trigger requires. It must already be low — the cameras free-run *at all* today, which is only possible in master mode. **If it reads high, stop**: the whole approach assumes master mode. |
+| 5 | `XTR+` ↔ GND, DC volts, idle | see below | **This is the gate.** |
+
+#### Reading the result
+
+Take measurement 5 first; measurements 2–3 disambiguate it when it is unclear.
+
+| Measurement 5 | Also | Domain | Action |
+|---|---|---|---|
+| **~3.3 V** | typ. 10 k to `3V3` | pad is pulled to the board's 3.3 V rail → there is a buffer/shifter behind it | **Case A** |
+| **~1.8 V** | no path to `3V3` | pad is the raw sensor `XTRIG`, idling high on OVDD | **Case B** |
+| **~0 V** | finite R to GND only | pad is the raw `XTRIG` with a pull-down | **Case B** |
+| **drifts / won't settle** | no finite R either way | an auto-direction translator (TXB-type) with its input floating — these have weak keepers and no defined idle | **Case A**, but confirm by measuring again with `XTR+` briefly tied to `3V3` through 10 k: if it follows to 3.3 V, the pad is 3.3 V logic |
+| anything else | — | unclear | Assume **Case B** — it is the safe assumption, and it costs two resistors |
 
 ### 3.3 Case A — `XTR+` tolerates 3.3 V (expected)
 
