@@ -29,7 +29,7 @@ Scheduler jitter therefore lands directly on image brightness: ±100 µs of jitt
 userspace GPIO on this non-RT 4.9 kernel, worse under load) is ±2 % exposure error on a 5 ms
 exposure, frame to frame.
 
-The STM32H7's `TIM1` produces the same pulse in hardware with a ~40 ns tick and no jitter at all.
+The STM32H7's `TIM5` produces the same pulse in hardware with an 8.33 ns tick and no jitter at all.
 
 > **Note:** none of this is about *inter-camera* sync — one net fanned out to four cameras is
 > perfectly synchronous whatever drives it. It is about *exposure stability*, which the pulse-width
@@ -43,11 +43,11 @@ The STM32H7's `TIM1` produces the same pulse in hardware with a ~40 ns tick and 
 flowchart LR
     subgraph MCU["WeAct MiniSTM32H7xx (STM32H743VIT6)"]
         HSE["HSE 25 MHz crystal<br/>(fallback: HSI 64 MHz)"]
-        TIM["TIM1 — one counter<br/>ARR = frame period<br/>CCR1..4 = exposure"]
-        P1["CH1 · PE9 · P2-32"]
-        P2["CH2 · PE11 · P2-34"]
-        P3["CH3 · PE13 · P2-36"]
-        P4["CH4 · PE14 · P2-37"]
+        TIM["TIM5 — one 32-bit counter<br/>ARR = frame period<br/>CCR1..4 = exposure"]
+        P1["CH1 · PA0 · P2-17"]
+        P2["CH2 · PA1 · P2-18"]
+        P3["CH3 · PA2 · P2-19"]
+        P4["CH4 · PA3 · P2-20"]
         GND["GND · P2-43<br/>common LED cathode return"]
         UART["USART1 PA9/PA10<br/>115200 8N1 · optional"]
         HSE --> TIM --> P1 & P2 & P3 & P4
@@ -203,32 +203,43 @@ external component:
 **No external components at all** — the module's own `R4 = 200 Ω` sets the LED current, so the
 STM32 pins connect straight to the trigger pads. **8 conductors**: four signals and four returns,
 run as four twisted pairs. (It is five *nets*, but the ground node still has to reach four separate
-boards — see §5.) One TIM1 channel per camera, all four on the
+boards — see §5.) One TIM5 channel per camera, all four on the
 same counter — so the frame start is identical across cameras by construction, while each channel
 can carry its own exposure. No connection to camera ground anywhere.
 
 ```
-  PE9  (P2-32) -----------------> Trig+   CSI-C      If = (3.3 - 1.25) / 200
-  PE11 (P2-34) -----------------> Trig+   CSI-D         = 10.3 mA per camera
-  PE13 (P2-36) -----------------> Trig+   CSI-E      (200R is ON THE MODULE)
-  PE14 (P2-37) -----------------> Trig+   CSI-F
+  PA0  (P2-17) -----------------> Trig+   CSI-C      If = (3.3 - 1.25) / 200
+  PA1  (P2-18) -----------------> Trig+   CSI-D         = 10.3 mA per camera
+  PA2  (P2-19) -----------------> Trig+   CSI-E      (200R is ON THE MODULE)
+  PA3  (P2-20) -----------------> Trig+   CSI-F
                                     |
-  GND  (P2-43) ---------------------+      common Trig- return
+  GND  (P2-15) ---------------------+      common Trig- return
 ```
 
 | From (WeAct board) | Silkscreen | Header pin | → | To |
 |---|---|---|---|---|
-| `TIM1_CH1` | **`E9`** | P2‑32 | → | CSI‑**C** `Trig+` |
-| `TIM1_CH2` | **`E11`** | P2‑34 | → | CSI‑**D** `Trig+` |
-| `TIM1_CH3` | **`E13`** | P2‑36 | → | CSI‑**E** `Trig+` |
-| `TIM1_CH4` | **`E14`** | P2‑37 | → | CSI‑**F** `Trig+` |
-| Ground | **`GND`** | P2‑43 / P2‑44 | → | `Trig−` × 4 — one return per channel, two wires per GND pin (§5) |
+| `TIM5_CH1` | **`A0`** | P2‑17 | → | CSI‑**C** `Trig+` |
+| `TIM5_CH2` | **`A1`** | P2‑18 | → | CSI‑**D** `Trig+` |
+| `TIM5_CH3` | **`A2`** | P2‑19 | → | CSI‑**E** `Trig+` |
+| `TIM5_CH4` | **`A3`** | P2‑20 | → | CSI‑**F** `Trig+` |
+| Ground | **`GND`** | P2‑15 | → | `Trig−` × 4 — one return per channel, two wires on the GND pin (§5) |
+
+> ### ⚠ These pins changed — `PE9/PE11/PE13/PE14` are now the display
+> Earlier revisions of this document put the trigger on `TIM1` at `E9`/`E11`/`E13`/`E14`
+> (P2‑32/34/36/37), chosen when the on-board TFT-LCD header was assumed unpopulated. On a board with
+> the display fitted those pins **are** the panel — `E11` = CS, `E13` = WR_RS, `E14` = MOSI. Wiring
+> the optocouplers there now drives four trigger signals into the LCD.
+>
+> The trigger moved to `TIM5` on `A0`–`A3`, which this board leaves free. A side benefit: `TIM5` is
+> a 32-bit counter, so the auto-prescaler stays at 1 and pulse resolution is one timer tick —
+> **8.33 ns**, against ~517 ns on 16-bit `TIM1`.
 
 4 × 10.3 mA = 41 mA total, spread across four pins — each well inside the STM32's 25 mA per-pin
 limit.
 
-⚠ **`PE14` is in the opposite header column from the other three** — see the pin map in §5 before
-soldering.
+⚠ **The four channels zig-zag between the header's two columns.** `A0` and `A2` are odd-numbered
+(left column); `A1` and `A3` are even (right column). They occupy two adjacent rows, with a `GND` pin
+one row above `A0` — convenient, but easy to mis-count. See the pin map in §5 before soldering.
 
 > ### ⚠ Do NOT add a series resistor at 3.3 V
 > The module already has `R4 = 200 Ω`. At 3.3 V that is *more* resistance than 20 mA would need
@@ -244,7 +255,7 @@ diode mode: the anode is the pad that conducts with the red lead on it. Backward
 frames, swap the two wires — never damaging.
 
 **Checking the current once wired:** you cannot measure across R4 (it is on the module), so measure
-the pin voltage instead. With a channel asserted, `PE9`→`GND` should sit near 3.3 V minus very
+the pin voltage instead. With a channel asserted, `PA0`→`GND` should sit near 3.3 V minus very
 little; the current is then `(3.3 − 1.25 − V_pin_drop)/200`. Simpler: confirm the module responds,
 and calibrate timing with `skew`.
 
@@ -287,7 +298,7 @@ shows the lag is hurting short exposures, drive the LEDs from 5 V instead:
                    |
                Collector
              2N2222 (verify pinout in diode mode - TO-92 varies)
-  PE9 --[1k]-- Base
+  PA0 --[1k]-- Base
                Emitter
                    |
                   GND   (same ground as that +5V)
@@ -318,8 +329,14 @@ with defaults and starts on its own.
 | `USART1_RX` (`PA10`) | **`A10`** | P1‑26 | ← | `UART2_TXD` | 2 |
 | `GND` | **`GND`** | P2‑43 | — | `GND` | 6 |
 
-**Which `/dev/ttyTHS*` is `J22`?** Not derivable from the running tree — no UART pin is claimed in
-`pinmux-pins`, so identify it on the bench:
+**Which `/dev/ttyTHS*` is `J22`?** → **`/dev/ttyTHS1`**, identified on the bench 2026‑08‑26 with the
+MCU attached and running: writing `status` to it at 115200 returned camtrig's report, and a limit
+refusal came back byte-identical to the same command over USB CDC. `ttyTHS2` and `ttyTHS3` are
+silent. Wiring as tabled above (`A9`→pin 3, `A10`→pin 2, `GND`→pin 6) is correct as printed — no
+crossing surprise.
+
+The loopback procedure below is kept for a board where the mapping differs or the MCU is not yet
+attached. It is not derivable from the running tree: no UART pin is claimed in `pinmux-pins`.
 
 ```bash
 # On the TX2, with J22 pins 2 and 3 shorted together (loopback), no MCU attached:
@@ -367,22 +384,25 @@ cameras, so no ground loops and no star-point discipline.
 ### Header layout — mind the column
 
 ```
-        WeAct P2 header  (odd | even)
-   row 16    31 PE8  | 32 PE9     <- CH1
-   row 17    33 PE10 | 34 PE11    <- CH2
-   row 18    35 PE12 | 36 PE13    <- CH3
-   row 19    37 PE14 | 38 PE15    <- CH4   ** OPPOSITE COLUMN **
-   row 20    39 PB10 | 40 PB11
-   row 21    41 3V3  | 42 5V
-   row 22    43 GND  | 44 GND
+        WeAct P2 header  (odd | even)      silkscreen
+   row  7    13 GND  | 14 V+              GND  V+     <- Trig- return
+   row  8    15 PA0  | 16 PA1             A0   A1     <- CH1 | CH2
+   row  9    17 PA2  | 18 PA3             A2   A3     <- CH3 | CH4
+   row 10    19 PA4  | 20 PA5             A4   A5
+   ...
+   row 16    31 PE8  | 32 PE9             E8   E9     <- (old CH1 - now free)
+   row 17    33 PE10 | 34 PE11            E10  E11    <- LCD backlight | LCD CS
+   row 18    35 PE12 | 36 PE13            E12  E13    <- LCD SCK       | LCD WR_RS
+   row 19    37 PE14 | 38 PE15            E14  E15    <- LCD MOSI
 ```
 
-CH1–CH3 are three consecutive pins down the **even** column; **CH4 is in the odd column**, one row
-below CH3. Easy to miscount when soldering. (`PE8` and `PE15` are `TIM1_CH1N` and `TIM1_BKIN`, not
-usable as channel outputs — which is why the run is not contiguous.)
+All four channels sit in **two adjacent rows**, with a `GND` pin in the row immediately above `A0`.
+They **zig-zag between the columns**: `A0`/`A2` are odd (left), `A1`/`A3` are even (right). Read the
+silkscreen label next to each hole rather than counting rows — the labels are printed per pin and
+are the authoritative reference.
 
-`PE11`/`PE13`/`PE14` are shared with the on-board TFT-LCD header. Fine here — the LCD is not fitted
-— but do not populate both.
+⚠ **`PE10`–`PE14` are the on-board TFT-LCD connector and are now driven as the display.** Do not wire
+the trigger there. Earlier revisions of this document did; see the box in §4.1.
 
 ### Harness topology — count conductors, not nets
 
@@ -399,16 +419,16 @@ boards, so in a star from the MCU:
 minimal enclosed area instead of four loops sharing an ill-defined return path.
 
 ```
-  PE9  p32 ===+=====================> Trig+   CSI-C
+  PA0  p17 ===+=====================> Trig+   CSI-C
   GND  p43 ===+   twisted pair         Trig-
 
-  PE11 p34 ===+=====================> Trig+   CSI-D
+  PA1  p18 ===+=====================> Trig+   CSI-D
   GND  p43 ===+                        Trig-
 
-  PE13 p36 ===+=====================> Trig+   CSI-E
+  PA2  p19 ===+=====================> Trig+   CSI-E
   GND  p44 ===+                        Trig-
 
-  PE14 p37 ===+=====================> Trig+   CSI-F
+  PA3  p20 ===+=====================> Trig+   CSI-F
   GND  p44 ===+                        Trig-
 
   the four returns share p43 / p44 at the connector - two wires per GND pin
@@ -461,9 +481,13 @@ Each step is reversible and fails loudly rather than silently.
 
 1. **Confirm LED polarity** on each module (diode mode; anode is the pad that conducts with the red
    lead on it) and record it in §9.
-2. **Flash** the firmware (§6). With nothing connected, the `PE3` LED blinking ~2 Hz means the timer
-   is running. `status` over serial confirms clock source, period and per-channel pulse widths.
-3. **Check a channel before it meets a camera.** A DMM on DC across `PE9`→`GND` reads the average:
+2. **Flash** the firmware (§6 — `make flash`, no BOOT0 press needed). With nothing connected, the
+   `PE3` LED blinks a steady **1 Hz** (0.5 s on, 0.5 s off): it toggles every 15 emitted pulses, so
+   the rate is derived from the real timer clock and a wrong clock tree is visible by eye. A *fast*
+   flash in repeating groups is a fault code, not the heartbeat — see `firmware/README.md`.
+   The **on-board TFT** shows rate, exposure and a live pulse count. `status` over USB
+   (`/dev/ttyACM*`) or `USART1` confirms clock source, period and per-channel pulse widths.
+3. **Check a channel before it meets a camera.** A DMM on DC across `PA0`→`GND` reads the average:
    at 30 fps / 5 ms with the default active-high polarity that is `3.3 × 0.15 ≈ 0.5 V`. Reading
    ~2.8 V instead means the polarity is inverted — fix with `pol` before wiring.
 4. **Wire one camera first** (§4.1) — two wires, no components — cameras still free-running

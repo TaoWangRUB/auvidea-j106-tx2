@@ -162,6 +162,11 @@ can fail silently.
 
 ### D6. `TIM1_CH1..CH4` on `PE9/PE11/PE13/PE14`; auto-prescaler
 
+> **SUPERSEDED by `add-camtrig-rtos-usb-cdc` D14.** The premise below — that the TFT-LCD header is
+> "not fitted" — is false for the board actually in use: `PE11`/`PE13`/`PE14` are its CS / WR_RS /
+> MOSI. The trigger moved to `TIM5_CH1..CH4` on `PA0`-`PA3`, which also removed the 16-bit ARR
+> ceiling discussed below (resolution ~517 ns → 8.33 ns). Kept for the reasoning, not the pinout.
+
 `TIM1` in PWM mode 1 produces the pulse entirely in hardware: `ARR` sets the period, `CCRx` the
 exposure, and `CCER.CCxP` selects which way round the pin drives it.
 
