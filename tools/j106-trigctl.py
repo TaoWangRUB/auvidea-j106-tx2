@@ -11,9 +11,18 @@ so two firmware commands exist for what that barrier hides -- `pol` (does drivin
 the LED assert the trigger, or release it?) and `skew` (the opto's on/off delay
 asymmetry, which lands straight on exposure). Reach both with `raw`.
 
-  >>> RUNS EITHER SIDE. <<<   Wherever the serial link is: on the board if the
-  MCU is wired to M110 J22 (a /dev/ttyTHS*), on the build host if it is on a
-  USB-serial dongle (a /dev/ttyUSB*). Nothing here touches the cameras.
+  >>> RUNS EITHER SIDE. <<<   Wherever the serial link is: over the firmware's
+  USB CDC-ACM port (a /dev/ttyACM*, the usual case -- the same USB-C that powers
+  and flashes the board), on the board if the MCU is wired to M110 J22 (a
+  /dev/ttyTHS*), or on a USB-serial dongle (a /dev/ttyUSB*). All three speak the
+  identical protocol and may be attached at once. Nothing here touches the
+  cameras.
+
+  >>> SETTINGS DO NOT SURVIVE A POWER CYCLE. <<<   The firmware boots at its
+  compiled-in defaults (30 fps, 5 ms). That matters when the board is powered
+  from the host's USB: a host reboot or suspend drops VBUS, resets the MCU, and
+  the rig comes back at the defaults with no error anywhere. Re-apply after any
+  reconnect, or power the board from its own 5 V and use USB for data only.
 
   ./j106-trigctl.py status
   ./j106-trigctl.py fps 30 --exposure 5000

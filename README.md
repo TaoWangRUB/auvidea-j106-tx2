@@ -740,7 +740,7 @@ removed its most dangerous part:
 - **No ground is shared** with the cameras — the LED cathode returns to the MCU's own ground.
 - But it needs **current, not voltage**: ~10 mA per LED, and four in parallel would be 40 mA from
   one pin, over the STM32's 25 mA per-pin limit. So it is **one channel per camera** —
-  `TIM1_CH1..CH4` on `PE9/PE11/PE13/PE14` — all on **one counter**, so the frame start stays
+  `TIM5_CH1..CH4` on `PA0/PA1/PA2/PA3` — all on **one 32-bit counter**, so the frame start stays
   identical across cameras by construction while each channel can carry its own exposure. **8 conductors
   (4 signals + 4 returns, as four twisted pairs) and no external components**: the vendor manual
   identifies the part as a **TLP281** with its own **`R4 = 200 Ω`** on the module, giving 10.3 mA at
@@ -1092,23 +1092,44 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
 - **Carrier buttons** — all functional; verified map below. The M110 "Recovery" button now triggers software
   recovery via [`tools/j106-recovery-key`](tools/).
 
-### ◐ Built, not yet wired
+### ◐ Deployed, not yet wired
 
 - **Hardware trigger for the four IMX296** (§5 *Stage 8*). Everything on the software side is done
   and verified as far as it can be without the wiring:
   - `patches/0003-imx296-external-trigger-j106.patch` — compiles clean, `Image` rebuilt and
     verified `4.9.337-tegra`; the patch re-applies onto a pristine tree byte-for-byte. **No DT
     change.**
-  - `hw-trigger/firmware/` — STM32H7 firmware builds with `-Werror` (~3.9 kB).
+  - `hw-trigger/firmware/` — **rebuilt as a standard STM32 project and verified on the board**
+    (2026‑08‑26). HAL + FreeRTOS + ST's USB Device Library; ~51 kB. Confirmed live over its own USB
+    CDC console: `clock=hse25-pll240`, `timer_hz=120000000`, `psc=0 arr=3999998 ccr=598288`, all
+    limits refusing correctly, `burst` terminating, and the waveform registers unchanged under ~400
+    commands in 9.1 s while pulses advanced at 29.97 fps.
+    - **Trigger pins moved** to `TIM5_CH1..4` on `PA0`–`PA3`. `PE9/PE11/PE13/PE14` are the on‑board
+      TFT‑LCD connector, so the old pinout made the integrated display unusable. `TIM5` is 32‑bit,
+      so pulse resolution went from ~517 ns to **8.33 ns**.
+    - **Control link over USB‑C** (`0483:5740` → `/dev/ttyACM*`), alongside `USART1`; both live at
+      once, replies routed to the originating transport.
+    - **Status on the integrated 0.96" TFT** — rate, exposure, pulse count, `pol`/`skew`, clock and
+      link — so the rig is legible with no host attached.
+    - **`make flash` needs no BOOT0 press**: the firmware reboots itself into the ROM bootloader
+      (vector at `0x1FF09800`, established by measurement — `0x1FF00000` reads as zeros).
   - `tools/j106-sync-check.py` — **run on the live board**, and it is what produced the
     free-running baseline above (worst skew 2.43 ms, drift 8.33 µs/s).
   - **Trigger input characterised**: optocoupler, isolated (README §5 Stage 8). The level-shifting
     risk is gone; the circuit is 4 signal wires plus a common return, no external components.
   - **Missing: the wiring itself** — 8 conductors (four twisted pairs, no components) between the
-    STM32H7 (`PE9/PE11/PE13/PE14`) and the four modules' trigger pads, and the firmware flashed
+    STM32H7 (`PA0/PA1/PA2/PA3`, header P2-17..20) and the four modules' trigger pads, and the firmware flashed
     over DFU.
-  - Not deployed: the rebuilt `Image` has not been installed behind an `extlinux` LABEL yet, since
-    triggered mode cannot be tested until the wiring exists.
+  - **Deployed 2026‑08‑26**: `Image.j106trig` (`4.9.337-tegra #7`, patches 0001+0002+**0003**) is
+    installed behind `LABEL j106trig` and is now `DEFAULT`, reusing the existing `j106imx296.dtb`
+    (patch 0003 needs **no DT change**). `sha256` verified against the local build;
+    `LABEL j106imx296` kept as the fallback and `extlinux.conf.bak-pre-trig` alongside it. Booted and
+    verified: all four sensors probe (`2-0018 2-001a 7-0018 7-001a`), all four capture 10/10 frames
+    free-running, and `/sys/module/imx296/parameters/trigger_mode` exists and is writable
+    (currently `0`). So the kernel side is no longer on the critical path — enabling triggered mode
+    is one `echo 1` once the wires are on.
+  - ⚠ **If you wired anything from an earlier revision of `WIRING.md`, re-check it.** The trigger
+    pins changed from `PE9/PE11/PE13/PE14` to `PA0`–`PA3`; the old pins now drive the display.
 
 ### ◑ Intermittent (hardware/Argus quirks, not config bugs)
 - ~~**South cameras B/D (`0x12`) per‑boot enumeration lottery**~~ — **FIXED** by the boot‑time reset
