@@ -527,13 +527,90 @@ capture. No reboot, no reflash, no DTB change.
 | `XTR+` ↔ `XTR−`, diode mode | **1.2 V forward, OL reversed** → optocoupler LED | 2026‑08‑25 |
 | `3V3` ↔ module GND | **3.3 V** powered / **1.9 kΩ** unpowered → ground reference verified | 2026‑08‑25 |
 | `XTR−` ↔ GND, `XTR+` ↔ GND, powered | **both OL** → input is galvanically isolated | 2026‑08‑25 |
-| LED polarity | red lead on `XTR−` conducts ⇒ **`XTR−` = anode** (confirm per module) | 2026‑08‑25 |
+| ~~LED polarity~~ | ~~red lead on `XTR−` conducts ⇒ `XTR−` = anode~~ — **SUPERSEDED, see below** | 2026‑08‑25 |
+| **LED polarity (corrected)** | red lead on **`XTR+`** conducts (1.2 V) ⇒ **`XTR+` = anode**, as the vendor manual says | 2026‑08‑27 |
 | **Free-running baseline** — worst skew **2.43 ms**, drift **8.33 µs/s** over 20 s, 4× IMX296 @ 30.01 fps | **measured** | 2026‑08‑25 |
 | Optocoupler part number | **TLP281**, per the vendor manual; on-module `R4 = 200 Ω` ⇒ 10.3 mA at 3.3 V, no external resistor | 2026‑08‑25 |
-| Working polarity (`pol 0` or `1`) | _pending_ | |
-| `skew` calibration | _pending_ | |
-| Triggered inter-camera spread | _pending_ | |
-| Frame count vs trigger count over 300 pulses | _pending_ | |
+| Working polarity (`pol 0` or `1`) | _blocked — neither produces frames, see §9a_ | |
+| `skew` calibration | _blocked_ | |
+| Triggered inter-camera spread | _blocked_ | |
+| Frame count vs trigger count over 300 pulses | _blocked_ | |
+
+> ⚠ **The 2026‑08‑25 polarity result was wrong, and the reason matters.** It was taken with the
+> meter's test leads in the wrong jacks — the same session read the 5 V rail as **−5 V**, which was
+> not noticed at the time. Every DC and diode reading from that session has inverted sign, so the
+> anode was identified backwards. The 2026‑08‑27 retest was done after validating the meter against
+> a known signal (`A0` reading a clean 30 Hz and 486 mV), and agrees with the vendor manual.
+>
+> Lesson for anyone repeating this: **validate the meter on a signal of known value before trusting
+> a polarity result.** A reversed-lead diode test looks perfectly plausible and points you the wrong
+> way.
+
+### 9a. Trigger bring-up attempt — 2026‑08‑26/27
+
+Port C wired (`A0` → `XTR+`, `GND` → `XTR−`). **No frames in any configuration.** The drive side
+and the sensor side each verify correct; the link between them does not.
+
+**Drive side — measured**
+
+| Measurement | Value | How |
+|---|---|---|
+| `A0` → `GND`, DC | **486 mV** | DMM average |
+| `A0` → `GND`, frequency | **30 Hz** | DMM Hz |
+| Current, `A0` in series to `XTR+` | **1.5 mA** | DMM mA, average |
+
+Derived at the 14.957 % duty (`CCR`/(`ARR`+1) = 598288/3999999):
+
+| Quantity | Value |
+|---|---|
+| Pin voltage during pulse | 3.25 V |
+| LED current during pulse | **10.0 mA** |
+| Drop across on-module `R4` (200 Ω) | 2.01 V |
+| Implied LED forward voltage | **1.24 V** |
+
+The derived 1.24 V and the static diode-test 1.2 V are independent routes to the same number,
+agreeing within 40 mV. **The LED really is conducting ~10 mA at 15 % duty.**
+
+**Sensor side — I²C readback while streaming in trigger mode**
+
+| Register | Value | |
+|---|---|---|
+| `0x300B` TRIGEN | `0x01` | ✓ trigger enabled |
+| `0x30AE` LOWLAGTRG | `0x01` | ✓ fast trigger |
+| `0x3036` SYNCSEL | `0xF0` | ✓ Hi-Z (`0xC0` when free-running) |
+| `0x3000` STANDBY | `0x00` | ✓ streaming |
+| `0x3002` XMSTA | `0x00` | ✓ master operation released |
+
+`dmesg` confirms `imx296 2-001a: streaming: EXTERNAL TRIGGER (XTRIG, fast trigger)`.
+
+**Configurations tried, all producing no frames**
+
+`pol 1` and `pol 0`, each at 5 ms/30 fps, 20 ms/5 fps and 100 ms/2 fps — six combinations. Then,
+written live over I²C mid-stream: `SYNCSEL = 0xC0` (normal instead of Hi-Z), and `LOWLAGTRG = 0`
+(sequential instead of fast trigger). Neither changed anything.
+
+**The finding that reframes the problem — `XVS` is dead**
+
+| Condition | `XVS` pad reads |
+|---|---|
+| Camera streaming at **59.34 fps** (measured over 900 frames), `SYNCSEL = 0xC0` (drive, not Hi-Z) | **49.97 Hz** — mains hum |
+
+Every precondition for `XVS` to be live was satisfied, and the measurement chain was validated on
+`A0` minutes earlier. **That breakout pad is not connected to the sensor's `XVS` output.**
+
+This matters more than the trigger failure itself. The module's interface was identified entirely by
+multimeter, never from a datasheet, and one of those identifications is now disproven. The assumption
+that `XTR±` reaches `XTRIG` rests on exactly the same kind of inference — and it would explain the
+whole picture: a correctly driven optocoupler, a correctly configured sensor, and no connection
+between them.
+
+**What is needed to proceed:** the module's schematic or pinout — specifically which sensor pin the
+`XTR±` optocoupler output drives, what `MAS` selects, and whether the breakout pads require 0 Ω links
+to be fitted. Further bench permutations are guesses against an undocumented interface.
+
+Reference data for that enquiry: pads are `3V3 · MAS · XVS · XHS · XTR+ · XTR−`; the sensor
+free-runs at 60 fps as master; `XTR±` measures as an isolated LED (1.2 V forward, OL reversed, both
+legs open to module ground).
 
 ### Free-running baseline, in full
 
