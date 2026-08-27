@@ -897,6 +897,39 @@ genuinely driven there. LED driven + sensor armed + no frames = the fault is on 
 **output** side, inside the module, where it cannot be probed — yet that same module's opto output
 demonstrably reaches `XTRIG` when the module sits on the Pi.
 
+### RESULT — SYNCHRONISED, acceptance test passed (2026‑08‑27)
+
+Three cameras (ports C, D, E — port F\'s trigger lead not connected), kernel `#8` with the `0x30af`
+fix, DTB with `discontinuous_clk="yes"`, STM32 at 30 Hz `pol 0`, `trigger_mode=1`:
+
+```
+per camera
+  node        frames  dropped   mean interval   jitter (sd)
+  video0         300        0      33332.9 us        0.3 us   (30.00 fps)
+  video1         300        0      33332.9 us        0.3 us   (30.00 fps)
+  video2         300        0      33332.9 us        0.3 us   (30.00 fps)
+
+skew relative to video0 (nearest-frame match)
+  video1           median 0.0 us    max 2.0 us    drift  0.00 us/s
+  video2           median 0.0 us    max 2.0 us    drift -0.01 us/s
+
+verdict: SYNCHRONISED - skew is bounded and not drifting.
+```
+
+| | Free-running baseline | Triggered | |
+|---|---|---|---|
+| Worst inter-camera skew | **2.43 ms** | **2.0 µs** | ~1200x better |
+| Drift | **8.33 µs/s** | **0.01 µs/s** | ~800x better |
+| Dropped frames | — | **0 / 300** per camera | |
+
+⚠ **`jetson_clocks` is REQUIRED for multi-camera capture.** Without it, three concurrent cameras
+degrade badly — triggered gave 12.8/17.6/11.9 fps with 139 syncpt timeouts, and **free-running was
+just as bad** (18.0/15.6/10.4 fps, 85 timeouts), so this is a general throughput limit, *not*
+trigger-related. Each camera individually reached 30.00 fps with zero timeouts either way. The board
+was already at `nvpmodel` **MAXN** with 6 CPUs online — MAXN alone is not sufficient; the clocks
+still scale dynamically until `jetson_clocks` pins them. With it applied: all three at **30.01 fps,
+zero timeouts**.
+
 ### ROOT CAUSE FOUND — `0x30af` must be `0x0b`, not `0x09` (2026‑08‑27)
 
 **A one-byte error in patch `0002`\'s `imx296_mode_common[]` table silently disables external
