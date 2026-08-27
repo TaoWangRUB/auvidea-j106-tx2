@@ -551,6 +551,28 @@ capture. No reboot, no reflash, no DTB change.
 Port C wired (`A0` → `XTR+`, `GND` → `XTR−`). **No frames in any configuration.** The drive side
 and the sensor side each verify correct; the link between them does not.
 
+**Isolation re-verified 2026‑08‑27** — with the trigger wires *disconnected* and everything powered
+off, probing from each pad to carrier ground (which reaches the module through the CSI ribbon):
+
+| Pad → carrier GND | Reading | Meaning |
+|---|---|---|
+| `XTR−` | **OL** | isolated |
+| `XTR+` | **OL** | isolated |
+| `3V3` | 64 Ω | unpowered rail: decoupling + IC leakage, not a short |
+| `XHS` / `XVS` | 112 kΩ | a real path to something — *not* an unconnected pad |
+
+**This confirms §3's optocoupler finding.** Only the *polarity* from the 2026‑08‑25 session was
+wrong; the isolation was right. Two consequences worth stating plainly:
+
+- **The 3.3 V drive is safe.** `XTRIG` is 1.8 V logic with an absolute maximum of `OVDD + 0.3 V` =
+  2.1 V, but the optocoupler means the sensor never sees it — the 3.3 V only ever drives an LED.
+  The §3.4 divider is *not* needed. All four cameras capture normally, confirming no damage.
+- **The fault is downstream of the optocoupler**, on its output side, where we cannot probe.
+
+⚠ The 112 kΩ on `XVS` is hard to reconcile with it reading only mains hum while the sensor was
+streaming at a measured 59.34 fps with `SYNCSEL = 0xC0` (drive, not Hi-Z). A pad connected to a
+driven output should have shown ~60 Hz. Left as an open contradiction rather than explained away.
+
 **Drive side — measured**
 
 | Measurement | Value | How |
