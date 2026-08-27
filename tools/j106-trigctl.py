@@ -124,7 +124,7 @@ def main():
                     help=f"serial device (default {DEFAULT_PORT})")
     ap.add_argument("--baud", type=int, default=DEFAULT_BAUD)
 
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("status", help="report clock, period, exposure, pulse count")
     sub.add_parser("start", help="start triggering")
     sub.add_parser("stop", help="stop; every channel parks unasserted")
@@ -145,6 +145,8 @@ def main():
     p.add_argument("text")
 
     args = ap.parse_args()
+    if getattr(args, "cmd", None) is None:      # py3.6 has no add_subparsers(required=)
+        ap.error("a subcommand is required")
 
     # Catch the obvious refusals locally, with the reason.
     if args.cmd == "fps":

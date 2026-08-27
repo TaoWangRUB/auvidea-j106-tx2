@@ -11,6 +11,12 @@
       timestamps are `CLOCK_REALTIME` (`gpiolib.c:730`)
 - [ ] 1.4 Measure the userspace wake-up latency and jitter on a `gpiochip` edge, so the IMU
       timestamp's error budget is a number rather than an assumption
+- [x] 1.5 Establish the camera-side error budget — **done**: inter-camera skew under hardware
+      trigger is **1.0 µs max, 0.00 µs/s drift** (`add-imx296-hw-trigger` §6.5), so the cameras are
+      effectively one clock and Δ is a single offset to estimate, not four drifting ones. The
+      STM32 still free-runs against the Tegra clock: measured frame interval 33332.5 µs against a
+      commanded 33333 µs, ≈ −15 µs/s (~50 ms/hour), so a fixed Δ goes stale on long runs — this is
+      what the §3 fit is for
 
 ## 2. IMU reader (`tools/j106-imu-read.py`)
 
@@ -35,7 +41,14 @@
 - [ ] 3.4 Refuse to report a fit when the cameras are free-running — detect it the way
       `j106-sync-check.py` does and say so, rather than returning a meaningless line
 - [ ] 3.5 Derive exposure midpoint per frame from the fit, the commanded exposure, the sensor's
-      14.26 µs offset and the optocoupler `skew`
+      14.26 µs offset and the optocoupler `skew`. **Pipeline constants now measured** on IMX296
+      @1456×1088 (`add-imx296-hw-trigger` §11), so this no longer needs estimating:
+      `readout = 16.1 ms`, `ISP = 1.9 ms`, `SOF→ISP-done = 18.0 ms` (sd 0.1), raw-V4L2 buffer
+      delivery `= 66.7 ms` after end-of-readout (sd 0.03, inherent — not queue depth).
+      Argus: `t_mid = t_SOF − exposure/2`. Raw V4L2: `t_mid = t_buffer − 16.1 ms − exposure/2`,
+      the buffer stamp being `EndOfFrame` on `CLOCK_MONOTONIC` (flag `0x00002001`).
+      Under hardware trigger `exposure` is the exact commanded pulse width, not an AE estimate,
+      and all four cameras share one edge — so a single `t_mid` covers all four
 - [ ] 3.6 Show the uncertainty improving as √N with frame count, to confirm the fit behaves
 
 ## 4. Camera-to-IMU offset (Δ)

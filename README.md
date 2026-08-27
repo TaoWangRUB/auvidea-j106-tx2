@@ -779,6 +779,91 @@ Enable, once wired:
 echo 1 | sudo tee /sys/module/imx296/parameters/trigger_mode   # 0 = free-running (default)
 ```
 
+
+#### RESULT — SYNCHRONISED (2026‑08‑27/28)
+
+Wired, triggered, and verified on all four cameras (ports C–F):
+
+```
+per camera        frames  dropped   mean interval   jitter (sd)
+  video0 (C)         300        0      33332.5 us       1.9 us   (30.00 fps)
+  video1 (D)         300        0      33332.5 us       1.9 us   (30.00 fps)
+  video2 (E)         300        0      33332.5 us       2.0 us   (30.00 fps)
+  video3 (F)         300        0      33332.5 us       1.9 us   (30.00 fps)
+
+skew vs video0     median 0.0 us    max 1.0 us    drift 0.00 us/s
+verdict: SYNCHRONISED — skew is bounded and not drifting.
+```
+
+| | Free-running baseline | Hardware triggered |
+|---|---|---|
+| Worst inter-camera skew | 2.43 ms | **1.0 µs** |
+| Drift | 8.33 µs/s | **0.00 µs/s** |
+| Dropped frames | — | **0 / 300** per camera |
+
+Verified rate range **5–59 Hz**. The floor is tegra VI's hardcoded
+`chan->timeout = msecs_to_jiffies(200)` (`vi4_fops.c:1089`) — not a sensor limit.
+
+**Independently confirmed without trusting the timestamps.** `tools/j106-sync-frames.py` grabs raw
+frames from every `/dev/videoN` and keeps only the set whose V4L2 timestamps match (spread 0.0 µs).
+With a running clock in the scene, all four cameras read the **same digits**, with the same digit
+caught mid-transition — see `captures/sync_proof_timer_zoom.png`. This validates the timestamps
+rather than assuming them.
+
+⚠ **A live RTP grid cannot be used to judge synchronisation.** `csi_sender.sh` → `csi_receiver.sh`
+passes each camera through its own 100 ms `rtpjitterbuffer` before the compositor, so cells sit a
+frame or two apart (~66 ms) even with perfect sensors — the transport error is ~50,000× the thing
+being measured. Judge sync only from raw same-timestamp frames.
+
+**Three defects had to be fixed before any of this worked:**
+
+1. **`0x30af` was `0x09`, must be `0x0b`** (patch `0002`). One byte that silently disabled XTRIG:
+   the sensor armed perfectly (`TRIGEN=1`, `LOWLAGTRG=1` read back live) and produced zero frames,
+   only `PXL_SOF syncpt timeout`. Found by diffing the *complete* 41-entry init table against the
+   Raspberry Pi driver — the only difference. Register state looked correct throughout.
+2. **`discontinuous_clk` must be `"yes"`** for the IMX296 nodes. In trigger mode the clock lane
+   drops to LP between frames; declaring it continuous made NVCSI police LP sequences it should
+   ignore (`CILA_ERR_INTR_STATUS 0x0f` storm). The IMX219 macro must stay `"no"`.
+3. **`jetson_clocks` is required for concurrent multi-camera capture** — and is *not*
+   trigger-related. Without it three cameras give 12.8/17.6/11.9 fps triggered and 18.0/15.6/10.4
+   free-running; each alone reaches 30.00 fps either way. `nvpmodel` MAXN is not sufficient.
+   Installed as `jetson-clocks.service`, verified across a reboot.
+
+**Argus AE must be locked in trigger mode.** Exposure is the pulse width, so AE cannot move its
+actuator (`ignoring <n>` in dmesg) and hunts on gain instead: a measured **3.47 Hz limit cycle,
+150 luma peak-to-peak (171% of mean)**, seen as heavy flashing. Not a mains beat — that would be a
+1–3 frame period, this was ~8.7 frames. `csi_sender.sh` now locks AE when the driver reports
+trigger mode: p2p 150.5 → 0.8, same mean brightness.
+
+**Polarity matters and the frame rate will not reveal it.** Both polarities rate-lock; `pol 1`
+silently yields *exposure = period − commanded*. A raw-sensor sweep at 30 Hz shows brightness
+rising with commanded exposure at `pol 0` (959→1027 for 1–15 ms) and falling at `pol 1`
+(1112→1043). Use **`pol 0`**.
+
+#### Latency and where to timestamp (measured, IMX296 @1456×1088)
+
+| Stage | Cost |
+|---|---|
+| Readout + MIPI → NVCSI → VI | **16.1 ms** |
+| ISP | **1.9 ms** |
+| `SOF → ISP-done` (Argus consumer has the frame) | **18.0 ms** (sd 0.1) |
+| Raw-V4L2 buffer age at `DQBUF` | **66.7 ms** (sd 0.03) |
+
+**Bypassing the ISP makes latency worse, not better.** The ISP costs 1.9 ms; the raw V4L2 delivery
+path costs 66.7 ms — flat from the first frame, so inherent, not queue depth. Argus hands over
+≈1.9 ms after end-of-readout. Use Argus for the pixels; the raw path is for *proving* sync, not for
+running an application.
+
+**Stamp at exposure midpoint** — the one instant a global-shutter frame corresponds to:
+- Argus: `t_mid = t_SOF − exposure/2`, SOF from the EVENT queue (`tools/latency/argus_evlat.cpp`).
+- Raw V4L2: `t_mid = t_buffer − 16.1 ms − exposure/2`; the buffer stamp is `EndOfFrame` on
+  `CLOCK_MONOTONIC` (flag `0x00002001`, verified).
+
+Under hardware trigger `exposure` is the exact commanded pulse width, so both corrections are exact
+rather than AE estimates — and since all four share one edge, one `t_mid` serves all four.
+⚠ `nvarguscamerasrc` GstBuffer PTS is **output-stamped** (~0.7 ms, transport only), *not* SOF —
+it looks like a capture timestamp and is not one. The RTP path discards capture time entirely.
+
 ## 6. Build, apply the patch & flash
 
 Builds run on an **x86‑64 Linux host**; artifacts deploy to the TX2 **over SSH**. Deployment is **always
@@ -1092,10 +1177,22 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
 - **Carrier buttons** — all functional; verified map below. The M110 "Recovery" button now triggers software
   recovery via [`tools/j106-recovery-key`](tools/).
 
-### ◐ Deployed, not yet wired
+### ✅ Hardware trigger — WIRED, WORKING, SYNCHRONISED (2026‑08‑28)
 
-- **Hardware trigger for the four IMX296** (§5 *Stage 8*). Everything on the software side is done
-  and verified as far as it can be without the wiring:
+All four IMX296 (ports C–F) run off one STM32 `TIM5` counter: **30.00 fps each, 0 dropped of 300,
+worst inter-camera skew 1.0 µs, drift 0.00 µs/s** — against a free-running baseline of 2.43 ms skew
+and 8.33 µs/s drift. Verified 5–59 Hz, and confirmed visually with a clock in the scene
+(`captures/sync_proof_timer_zoom.png`). Full detail, the three defects that had to be fixed, the AE
+lock, and the latency/timestamp budget are in §5 *Stage 8*.
+
+Deployed as `LABEL j106fix` (kernel `#8`, patches 0001+0002+0003) with `j106trig` and `j106disco`
+kept as fallbacks; DTB carries `discontinuous_clk="yes"` for the IMX296 nodes.
+`jetson-clocks.service` is installed and required for concurrent multi-camera capture.
+
+The historical pre-wiring notes follow.
+
+- **Hardware trigger for the four IMX296** (§5 *Stage 8*). Everything on the software side was done
+  and verified before the wiring existed:
   - `patches/0003-imx296-external-trigger-j106.patch` — compiles clean, `Image` rebuilt and
     verified `4.9.337-tegra`; the patch re-applies onto a pristine tree byte-for-byte. **No DT
     change.**
@@ -1117,9 +1214,8 @@ Deployed & verified 2026‑08‑25. Board: `ssh nvidia@10.42.0.157` (pw `nvidia`
     free-running baseline above (worst skew 2.43 ms, drift 8.33 µs/s).
   - **Trigger input characterised**: optocoupler, isolated (README §5 Stage 8). The level-shifting
     risk is gone; the circuit is 4 signal wires plus a common return, no external components.
-  - **Missing: the wiring itself** — 8 conductors (four twisted pairs, no components) between the
-    STM32H7 (`PA0/PA1/PA2/PA3`, header P2-17..20) and the four modules' trigger pads, and the firmware flashed
-    over DFU.
+  - ~~**Missing: the wiring itself**~~ — **done**: 8 conductors between the STM32H7
+    (`PA0/PA1/PA2/PA3`, header P2-17..20) and the four modules' trigger pads. All four trigger.
   - **Deployed 2026‑08‑26**: `Image.j106trig` (`4.9.337-tegra #7`, patches 0001+0002+**0003**) is
     installed behind `LABEL j106trig` and is now `DEFAULT`, reusing the existing `j106imx296.dtb`
     (patch 0003 needs **no DT change**). `sha256` verified against the local build;
