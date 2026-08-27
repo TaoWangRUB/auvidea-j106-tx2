@@ -458,7 +458,7 @@ static void cmd_help(sink_t s)
 {
 	out_puts(s,
 		 "IMX296 trigger generator (J106/TX2)\n"
-		 "TIM1_CH1..4 on PE9/PE11/PE13/PE14 -> optocoupler LEDs\n"
+		 "TIM5_CH1..4 on PA0-PA3 -> optocoupler LEDs\n"
 		 "  fps <v>        frame rate, e.g. 30 or 59.94 (max 59.95)\n"
 		 "  period <us>    frame period directly\n"
 		 "  exp <us>       exposure, all four cameras\n"

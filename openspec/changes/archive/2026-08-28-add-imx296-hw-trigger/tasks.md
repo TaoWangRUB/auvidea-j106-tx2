@@ -63,10 +63,11 @@
 ## 5. Build and deploy
 
 - [x] 5.1 Rebuild the kernel `Image` with patches `0001`+`0002`+`0003`; verify `4.9.337-tegra`
-- [ ] 5.2 Deploy behind a new `extlinux` LABEL `j106trig`, keeping the current IMX296 label as
-      fallback; DTB unchanged — *held until the wiring exists; needs a board reboot*
-- [ ] 5.3 Confirm zero regression with `trigger_mode=0` — all four cameras still free-run and
-      capture as before
+- [x] 5.2 Deploy behind a new `extlinux` LABEL, keeping the previous IMX296 label as fallback —
+      **done**: kernel `#8` deployed as `LABEL j106fix`, with `j106trig` and `j106disco` kept as
+      fallbacks. The DTB did change after all (see 10.2)
+- [x] 5.3 Confirm zero regression with `trigger_mode=0` — **done**: all four free-run and capture,
+      Argus and raw V4L2 both unaffected
 
 ## 6. Bring-up and verification (BLOCKED — requires the XTRIG wiring)
 
@@ -75,11 +76,25 @@
       reversed; both legs OL to a ground verified at 3.3 V powered, 1.9 kΩ unpowered). The
       level-translation gate is obsolete; the circuit was redesigned around current drive
 - [ ] 6.1b Read the optocoupler part number off a module if legible (sets the usable exposure floor)
-- [ ] 6.2 Wire 4 signal wires + common cathode return (no external components — module has R4=200 Ω)
-- [ ] 6.2b Determine working polarity (`pol 0`/`1`) and calibrate `skew`
+- [x] 6.2 Wire 4 signal wires + common cathode return — **done**: all four ports C–F trigger
+- [x] 6.2b Determine working polarity — **done: `pol 0`**. Both polarities rate-lock, so frame rate
+      cannot be used to pick: `pol 1` silently gives *exposure = period − commanded* (the complement).
+      Proven by a raw-sensor exposure sweep at 30 Hz — brightness RISES with commanded exposure at
+      `pol 0` (959→1027 for 1–15 ms) and FALLS at `pol 1` (1112→1043)
+- [ ] 6.2c Calibrate `skew` — still 0; the optocoupler on/off asymmetry has not been measured
 - [x] 6.3 Capture a free-running baseline with `j106-sync-check.py` — **done ahead of the wiring**: worst skew 2.43 ms, drift 8.33 µs/s over 20 s, phase re-randomised per stream start
-- [ ] 6.4 Set `trigger_mode=1`, start the trigger, and confirm all four cameras deliver frames
-- [ ] 6.5 Re-run `j106-sync-check.py` and record the triggered skew against the baseline
+- [x] 6.4 Set `trigger_mode=1`, start the trigger, confirm all four deliver frames — **done**:
+      30.00 fps on all four, zero syncpt timeouts. Working range **5–59 Hz**; the floor is tegra VI's
+      hardcoded `chan->timeout = msecs_to_jiffies(200)` (`vi4_fops.c:1089`), not anything sensor-side
+- [x] 6.5 Re-run `j106-sync-check.py` and record triggered skew vs baseline — **done**, all four:
+      median skew **0.0 µs**, max **1.0 µs**, drift **0.00 µs/s**, 0 dropped of 300, 30.00 fps each.
+      Against the free-running baseline (2.43 ms skew, 8.33 µs/s drift) that is ~2400× tighter and,
+      critically, no longer drifting
+- [x] 6.5b Prove synchronisation *visually*, independent of the timestamps — **done**: a clock in
+      the scene photographed by all four. `tools/j106-sync-frames.py` grabs raw frames from every
+      `/dev/videoN` and keeps the set whose V4L2 timestamps match (spread 0.0 µs); all four read the
+      same digits, with the same digit mid-transition. See `captures/sync_proof_timer_zoom.png`.
+      This matters because it validates the timestamps themselves rather than trusting them
 - [ ] 6.6 Confirm frame count equals trigger count over a `burst` run
 
 ## 7. Documentation
@@ -102,6 +117,52 @@
 - [x] 8.4 Design: new D9 (the measurement and what it changed), D10 (runtime `pol`/`skew`), and
       D6 revised from one channel to four
 - [x] 8.5 Update proposal, README Stage 8 + status, firmware README, `tools/README.md`, `j106-trigctl.py`
+
+## 10. Defects found during bring-up (all fixed)
+
+- [x] 10.1 **`0x30af` must be `0x0b`, not `0x09`** — one byte in patch `0002`'s
+      `imx296_mode_common[]` silently disabled XTRIG. The sensor armed correctly every time
+      (`TRIGEN=1`, `LOWLAGTRG=1`, `STANDBY=0`, `XMSTA=0` all read back live) and then produced no
+      frames at all, only `PXL_SOF syncpt timeout`. Found by diffing the **complete** 41-entry init
+      table against the Raspberry Pi `imx296_init_table` — it was the only difference. Register
+      *state* looked perfect throughout, so nothing short of a full table diff would have caught it
+- [x] 10.2 **`discontinuous_clk` must be `"yes"` for IMX296** — a second, independent defect. In
+      trigger mode the sensor only transmits on an XTRIG edge, so its clock lane drops to LP between
+      frames; declaring the clock continuous made t186 NVCSI police LP sequences it should ignore
+      (`CILA_ERR_INTR_STATUS 0x0f` storm). Fixed in `tegra186-camera-j106-imx219.dtsi`; the IMX219
+      macro must stay `"no"`
+- [x] 10.3 **`jetson_clocks` is required for concurrent multi-camera capture, and is NOT
+      trigger-related** — without it three cameras degrade to 12.8/17.6/11.9 fps triggered and
+      18.0/15.6/10.4 fps free-running, while each camera alone reaches 30.00 fps either way.
+      `nvpmodel` MAXN alone is insufficient; clocks still scale until pinned. Installed as
+      `jetson-clocks.service` on the board, verified across a reboot
+- [x] 10.4 **Argus AE oscillates in trigger mode** — exposure is the XTRIG pulse width, so AE's main
+      actuator is disconnected (the driver logs `ignoring <n>`); AE then hunts on gain. Measured a
+      **3.47 Hz limit cycle, 150 luma peak-to-peak (171% of mean)**, 78% of frames jumping >5 levels
+      — visible as heavy flashing. Ruled out mains beating by frequency (a 50/60 Hz beat would be a
+      1–3 frame period; this was ~8.7 frames). Fixed by locking AE when the driver is in trigger
+      mode: p2p 150.5 → 0.8, sd 42.5 → 0.21, same mean brightness
+
+## 11. Latency and timestamping (measured on IMX296 @1456×1088)
+
+- [x] 11.1 Re-run `tools/latency/argus_evlat` on the current IMX296 config — **done**:
+      `SOF→ISP-done` mean **18.0 ms** (median 18.0, p95 18.4, sd 0.1), `readout` **16.1 ms**,
+      `isp_est` **1.9 ms**. Latency is readout-bound; the ISP is nearly free
+- [x] 11.2 Measure how stale a raw-V4L2 buffer is when the application dequeues it — **done**:
+      **66.7 ms**, flat from the very first frame (min 66.69, p95 66.76, sd 0.03), i.e. inherent
+      delivery latency, not queue fill. **The raw path is ~35× slower to deliver than Argus**
+      (which hands over ≈1.9 ms after end-of-readout), so "bypass the ISP for lower latency" is
+      backwards on this platform
+- [x] 11.3 Record where to stamp a frame — **exposure midpoint**, the one instant a global-shutter
+      frame corresponds to. Argus: `t_mid = t_SOF − exposure/2` (SOF from the EVENT queue).
+      Raw V4L2: `t_mid = t_buffer − 16.1 ms − exposure/2` (buffer stamp is `EndOfFrame` on
+      `CLOCK_MONOTONIC`, flag `0x00002001`). With the hardware trigger `exposure` is the exact
+      commanded pulse width, so both corrections are exact rather than AE estimates. All four
+      cameras share one edge, so one `t_mid` serves all four
+- [ ] 11.4 Measure the `nvv4l2h264enc` stage; it is the one on-board step still unquantified
+- [ ] 11.5 Propagate the capture timestamp through the RTP path, or run the consumer on-board.
+      `csi_sender.sh` currently discards it, so nothing downstream can recover when a frame was
+      taken — arrival order is meaningless across four independent 100 ms jitterbuffers
 
 ## 9. Follow-on
 

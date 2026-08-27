@@ -83,7 +83,11 @@ for V in $(ls -v /dev/video* 2>/dev/null); do
   SID=$((SID+1))
 done
 echo "[grid-stream-host] cameras present: ${#CELL_SID[@]} / 6"
-echo "[grid-stream-host] streaming ${GRID_W}x${GRID_H} H.264 to ${HOST}:${PORT}"
+if [ -n "${SINK:-}" ]; then
+  echo "[grid-stream-host] recording ${GRID_W}x${GRID_H} H.264 -> ${SINK}"
+else
+  echo "[grid-stream-host] streaming ${GRID_W}x${GRID_H} H.264 to ${HOST}:${PORT}"
+fi
 echo "[grid-stream-host] argus AE: exp=[$ARGUS_EXP] gain=[$ARGUS_GAIN] dgain=[$ARGUS_DGAIN]"
 
 A=( nvcompositor name=comp )
@@ -94,11 +98,19 @@ done
 # between them. The queues either side of nvvidconv matter: without them the
 # pipeline either refuses to link or dies at runtime with
 # "nvbuffer_composite Failed".
+# Where the composited, hardware-encoded grid goes. Default is RTP to the host.
+# Override to record ON THE BOARD at the end of the hardware pipeline - no network,
+# no host decode/re-encode, and branches aligned to the on-board transport (~0.7 ms)
+# instead of the host's 100 ms jitterbuffers:
+#   SINK="h264parse ! mp4mux ! filesink location=/tmp/grid.mp4" ./grid-stream-host.sh
+# Stop it with SIGINT (not SIGKILL) so mp4mux writes its moov atom.
+SINK_SPEC=${SINK:-"h264parse ! rtph264pay config-interval=1 pt=96 ! udpsink host=$HOST port=$PORT sync=false async=false"}
+
 A+=( '!' "video/x-raw(memory:NVMM),width=${GRID_W},height=${GRID_H}"
      '!' queue '!' nvvidconv '!' 'video/x-raw(memory:NVMM),format=NV12' '!' queue
-     '!' nvv4l2h264enc insert-sps-pps=1 idrinterval=30 bitrate=$BITRATE
-     '!' h264parse '!' rtph264pay config-interval=1 pt=96
-     '!' udpsink host=$HOST port=$PORT sync=false async=false )
+     '!' nvv4l2h264enc insert-sps-pps=1 idrinterval=30 bitrate=$BITRATE )
+# shellcheck disable=SC2206
+A+=( '!' ${SINK_SPEC} )
 
 for N in 0 1 2 3 4 5; do
   if [ -n "${CELL_SID[$N]:-}" ]; then
@@ -115,4 +127,4 @@ for N in 0 1 2 3 4 5; do
   fi
 done
 
-exec gst-launch-1.0 "${A[@]}"
+exec gst-launch-1.0 -e "${A[@]}"

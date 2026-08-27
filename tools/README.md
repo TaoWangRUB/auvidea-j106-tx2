@@ -68,3 +68,38 @@ verdict: NOT synchronised — free-running.
 — i.e. the cameras sit up to **2.4 ms apart**, at a phase that is **re-randomised on every
 stream start**, drifting a further 3–8 µs/s. That is the number the hardware trigger has to
 beat.
+
+**Triggered result (2026-08-28, all four cameras):**
+
+```
+skew vs video0   median 0.0 us   max 1.0 us   drift 0.00 us/s
+per camera       300 frames, 0 dropped, 30.00 fps
+verdict: SYNCHRONISED — skew is bounded and not drifting.
+```
+
+## j106-sync-frames / j106-sync-video — prove synchronisation *visually*
+
+> **RUN THESE ON THE BOARD.** They open `/dev/video*` directly. Both reuse
+> `j106-sync-check.py`'s `Camera` class rather than reimplementing V4L2.
+
+`j106-sync-check.py` proves the *timestamps* agree. These two prove the **images** agree, which
+validates the timestamps instead of trusting them — point a running clock at the cameras and read
+the digits.
+
+```bash
+sudo ./j106-sync-frames.py -n 25 -o /tmp/sf     # save the one frame set with matching timestamps
+sudo ./j106-sync-video.py  -n 120 -o /tmp/v.gray # a 2x2 video where EVERY frame is 4 simultaneous exposures
+```
+
+`j106-sync-frames.py` keeps the set whose V4L2 timestamps match and writes each camera's raw
+buffer. `j106-sync-video.py` groups every frame by timestamp and emits a 2×2 grid, reporting the
+per-frame spread across cameras (measured: **max 1.0 µs, mean 0.30 µs**, 0 dropped of 120).
+
+⚠ **Do not judge synchronisation from a live RTP grid.** `csi_sender.sh` → `csi_receiver.sh` puts
+each camera through its own 100 ms `rtpjitterbuffer` before the compositor, so cells sit a frame or
+two apart (~66 ms) even with perfectly synchronised sensors — the transport error is ~50,000× the
+quantity being measured. Only raw same-timestamp frames can show it.
+
+Output is flat greyscale: these read raw Bayer with the ISP bypassed, so there is no debayer, no
+colour and no tone curve. That is deliberate — it is the shortest path from sensor to pixels with
+an exact capture time attached. For imagery, use the Argus path instead (see below).
