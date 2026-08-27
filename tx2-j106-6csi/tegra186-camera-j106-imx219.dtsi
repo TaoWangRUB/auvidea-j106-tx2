@@ -215,13 +215,20 @@
  * (CSI-2 DT 0x12) ahead of the image. Per the datasheet the full vertical
  * structure is FS + 2 embedded + 6 null (DT 0x10) + 4 optical black (DT 0x37)
  * + active image (DT 0x2b) + FE; only the DT 0x12 lines are counted here.
+ *
+ * discontinuous_clk = "yes" — REQUIRED, and it differs from the IMX219 macro above (which must
+ * stay "no"). In external-trigger mode the sensor only transmits when an XTRIG edge arrives, so
+ * its MIPI clock lane drops to LP between frames; declaring the clock continuous makes t186
+ * NVCSI police LP sequences it should ignore, and it logged a CILA_ERR_INTR_STATUS 0x0f storm.
+ * Setting "yes" removed every D-PHY/CIL error, and free-running is unaffected (60/60 frames,
+ * zero syncpt timeouts). Measured 2026-08-27 — see hw-trigger/WIRING.md §9b.
  */
 #define IMX296_MODE_COMMON(_iface)						\
 	mclk_khz = "74250";							\
 	num_lanes = "1";							\
 	tegra_sinterface = _iface;						\
 	phy_mode = "DPHY";							\
-	discontinuous_clk = "no";						\
+	discontinuous_clk = "yes";					\
 	dpcm_enable = "false";							\
 	cil_settletime = "0";							\
 	mode_type = "bayer";							\
