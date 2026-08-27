@@ -5,6 +5,9 @@ from a **WeAct MiniSTM32H7xx** hardware timer.
 
 - **Why an external MCU and not the TX2** → [§1](#1-why-the-trigger-does-not-come-from-the-tx2)
 - **The trigger input is opto-isolated** (measured) → [§3](#3-the-trigger-input-is-opto-isolated--measured). It needs **current, not voltage**, so read §3 and §4.1 before wiring.
+- **A working reference exists**: the same module triggers correctly on a Raspberry Pi Zero W
+  → [§9b](#9b-pi-side-reference-rig--the-same-trigger-working-2026-08-27). This disproves §9a's
+  leading hypothesis — `XTR±` *does* reach `XTRIG`, so the TX2 fault is on the TX2 side.
 - Design rationale and alternatives: [`openspec/changes/add-imx296-hw-trigger/design.md`](../openspec/changes/add-imx296-hw-trigger/design.md)
 
 ---
@@ -665,6 +668,410 @@ to be fitted. Further bench permutations are guesses against an undocumented int
 Reference data for that enquiry: pads are `3V3 · MAS · XVS · XHS · XTR+ · XTR−`; the sensor
 free-runs at 60 fps as master; `XTR±` measures as an isolated LED (1.2 V forward, OL reversed, both
 legs open to module ground).
+
+### 9b. Pi-side reference rig — the same trigger, WORKING (2026‑08‑27)
+
+A single IMX296 on a **Raspberry Pi Zero W**, triggered from the Pi's own hardware PWM. Built
+specifically to answer the question §9a ends on: is the module's `XTR±` → `XTRIG` path real, or is
+it another `XVS`-style inference about an undocumented breakout pad?
+
+**Result: the trigger works.** Frame rate follows the pulse frequency exactly, and exposure follows
+the pulse width. **§9a's leading hypothesis is disproven — the module is fine.**
+
+**Rig**
+
+| | |
+|---|---|
+| Module | Waveshare-style IMX296‑130, back-side pads `3V3 · MAS · XVS · XHS · XTR+ · XTR−`, 4-pin SOP optocoupler adjacent to `XTR+/XTR−`. **Same pad set as the J106 modules.** |
+| Host | Pi Zero W Rev 1.1, Raspberry Pi OS Trixie **armhf** (ARMv6 — arm64 will not boot), kernel `6.18.34+rpt-rpi-v6`, **stock** `imx296` driver, unpatched |
+| Sensor reported | `imx296 10-001a: found IMX296LQ` (colour), `1456x1088 10-bit RGGB @ 60.38 fps` |
+| Trigger source | the Pi's own **BCM2835 hardware PWM** (PWM0) — no MCU, no Pico |
+
+**Wiring**
+
+| From | To |
+|---|---|
+| Pi `GPIO18` (40-pin header **pin 12**) | `XTR+` |
+| Pi `GND` (header **pin 14**) | `XTR−` |
+
+**No external resistor** — the module's own `R4 ≈ 200 Ω` sets `If = (3.3 − 1.25)/200 ≈ 10.3 mA`,
+matching the 10.0 mA measured on the TX2 side in §9a. Note the pads are `XTR+`/`XTR−`, a *floating
+pair*, not `XTR`/`GND`; they label `3V3` separately, so `XTR−` is deliberately not ground.
+
+⚠ **Do not apply the Raspberry Pi documentation's 1.5 kΩ/1.8 kΩ divider here.** That is for the
+*official* RPi Global Shutter Camera, whose `XTR` is a direct 1.8 V logic pin. On an opto input the
+divider halves the LED current and it will not switch. The two designs are not interchangeable, and
+the failure modes are asymmetric: the divider on an opto merely fails to work, but direct 3.3 V on a
+real 1.8 V `XTRIG` pad sits at its absolute maximum. **When unsure, fit the divider first.**
+
+**Polarity is as silkscreened on this module** — `GPIO → XTR+`, `GND → XTR−`, PWM idling HIGH with a
+LOW pulse for the exposure. This agrees with §9a's *corrected* reading (`pol 0`: idle HIGH, exposure
+while the LED is OFF) and with the vendor's own script. It contradicts §3's note that `XTR−`
+measured as the anode. Proven by the exposure sweep below rather than by merely getting frames: an
+inverted opto would still give the correct frame *rate*, but brightness would *fall* as commanded
+exposure rose.
+
+**Configuration** — `/boot/firmware/config.txt`, needs a reboot:
+
+```
+dtparam=audio=off            # the onboard audio owns BOTH PWM channels
+dtoverlay=imx296,always-on   # MANDATORY - see below
+dtoverlay=pwm,pin=18,func=2  # PWM0 -> GPIO18
+```
+
+⚠ **`always-on` is mandatory, and is the single most transferable finding here.** The overlay's own
+help text: *"Leave the regulator powered up, **to stop the camera clamping I/Os such as XTRIG to
+0V**."* An unpowered module pulls `XTRIG` down and no external pulse can lift it. Note the vendor
+reference circuit in §9a shows the optocoupler's phototransistor collector tied to **`DOVDD`** — so
+the opto output cannot drive `FSIN`/`XTRIG` high unless the module's own digital rail is up. Any
+platform must guarantee the module stays powered across the whole trigger window, not just while a
+stream is nominally active.
+
+**Trigger source and maths.** Neither vendor manual's method is good: the InnoMaker manual's
+`gpioset` + `sleep` shell loop yields 0.5 fps with shell-scheduling jitter, and the Raspberry Pi
+documentation uses a separate Pico. The Pi can do it itself in hardware. Helper:
+`imx296-trigger.sh {on <fps> <exposure_us>|off|status}`, which computes
+
+```
+period     = 1e9 / fps                      # ns
+t_low      = exposure_us * 1000 - 14260     # t_exp = t_low + 14.26 us
+duty_cycle = period - t_low                 # normal polarity: duty is the HIGH time
+```
+
+then `echo 1 > /sys/module/imx296/parameters/trigger_mode`. **Start the PWM before the camera** —
+armed with no pulses arriving, the sensor emits no frames at all and looks hung. Always pass a fixed
+`--shutter` to `rpicam-*` so AGC does not fight the trigger.
+
+**Measured** (`rpicam-vid --save-pts`; note the `v2` timecode file is in **milliseconds**):
+
+| Condition | PWM | Measured fps | Interval | sd |
+|---|---|---|---|---|
+| `trigger_mode=1` | 30 Hz | **30.000** | 33.33 ms | 0.01 ms |
+| `trigger_mode=1` | 10 Hz | **10.000** | 100.00 ms | 0.00 ms |
+| `trigger_mode=0` *(control)* | 10 Hz, still running | **30.013** | 33.32 ms | 0.01 ms |
+
+The third row is what makes the first two mean anything: free-running, the sensor ignores the pulses
+entirely and reverts to its own rate. Without that control, "30 fps at 30 Hz" is a coincidence.
+
+Exposure tracks pulse width at fixed gain (10 fps, `--gain 1.0`):
+
+| LOW pulse | max pixel | ratio vs 1 ms | expected |
+|---|---|---|---|
+| 1 ms | 8 | 1.0× | 1× |
+| 4 ms | 35 | **4.4×** | 4× |
+| 10 ms | 73 | **9.1×** | 10× |
+
+Practical minimum exposure is **~100 µs** (the opto is the limit, not the sensor's 14 µs); ceiling
+is 59.95 fps.
+
+#### What this changes for the TX2 investigation
+
+§9a concluded: *"The assumption that `XTR±` reaches `XTRIG` rests on exactly the same kind of
+inference [as the disproven `XVS` pad] — and it would explain the whole picture."* It then asked for
+the module schematic before proceeding.
+
+**That is no longer the leading hypothesis.** The same module type, wired the same way, at the same
+~10 mA, triggers correctly on a different host with a different, unmodified driver. `XTR±` does
+reach `XTRIG`. The `XVS` pad being dead remains true and unexplained, but it does not generalise to
+`XTR±`.
+
+So the fault is on the **TX2 side**. On 2026‑08‑27 both leading code hypotheses were then tested
+**on the Pi** — using the working rig to falsify theories cheaply, instead of rebuilding the TX2
+kernel — and **both were disproven**:
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| `SYNCSEL = 0xF0` (Hi‑Z) breaks the trigger. Patch `0003` writes it; the RPi driver **never** does — both `rpi-6.6.y` and `rpi-6.12.y` define `IMX296_SYNCSEL_NORMAL`/`_HIZ` and never write them, so the commit message's claim that these values "follow the Raspberry Pi driver" is wrong. | The stock Pi driver never touches `0x3036`, so writing `0xF0` while stopped **persists into the stream**, exactly reproducing the TX2 state. Verified `0xF0` before *and* after the capture. | **FALSIFIED.** 30.000 fps, 33.33 ms, sd 0.01 ms — identical to `0xC0`. SYNCSEL is innocent. |
+| VMAX pinned to `fmt_height + MIN_VBLANK` = **1118** breaks it (vs the Pi's runtime **2249**). Patch `0003` pins VMAX *only* in trigger mode. | Wrote VMAX = `0x00045E` mid-stream on the Pi during a working triggered capture, and compared the rate before/after. | **FALSIFIED as the cause of total failure** — frames continued at 29.869 fps. **But jitter rose from sd 0.02 ms to sd 2.20 ms, a 100× degradation.** A real defect, just not this one. |
+
+**TX2 sensor state verified over I²C during a failing triggered stream** (port D, `2-0018`, while the
+STM32 pulsed at 30 Hz with `pol 0`):
+
+| Register | TX2 (fails) | Pi (works) | |
+|---|---|---|---|
+| `0x3000` STANDBY | `0x00` | `0x00` | ✓ streaming |
+| `0x300a` XMSTA | `0x00` | `0x00` | ✓ master released |
+| `0x300b` TRIGEN | `0x01` | `0x01` | ✓ |
+| `0x30ae` LOWLAGTRG | `0x01` | `0x01` | ✓ |
+| `0x3036` SYNCSEL | `0xf0` | `0xc0` | proven irrelevant above |
+| `0x3014` HMAX | `0x044c` | `0x044c` | identical |
+| `0x3010` VMAX | `0x00045e` (1118) | `0x0008c9` (2249) | jitter only, not fatal |
+
+`dmesg` shows `imx296 2-0018: streaming: EXTERNAL TRIGGER (XTRIG, fast trigger)`, then repeating
+`tegra-vi4: PXL_SOF syncpt timeout! err = -11` and `CILA_ERR_INTR_STATUS 0x0000000f` (vs `0x9` when
+free-running). Free-running on the same port immediately before captured 60/60 frames, so the port,
+sensor, CSI lanes and VI path are all healthy.
+
+**Conclusion: the sensor is armed correctly and identically to the working Pi, and receives nothing.
+The remaining explanation is that the trigger pulse is not reaching port D's `XTRIG`.** The software
+side of the TX2 is no longer a credible suspect — every functional register matches a rig that
+works. §9a wired **port C**, and port C's module has since been moved to the Pi; unless the STM32
+channel was physically re-landed on port D's `XTR+`/`XTR−`, port D's sensor has never had a trigger
+wire on it.
+
+**Next step is a wiring check, not a code change:** confirm which module the STM32 `TIM5_CH1`/`PA0`
+lead is actually attached to, and land it on the port D module's `XTR+`/`XTR−`. Only if a verified
+wire still yields no frames does the TX2 driver come back into question.
+
+**Cross-check: the STM32 is exonerated (2026‑08‑27).** The port‑C module — now on the Pi and proven
+good — was re-landed on the STM32's `A0`/`GND`, with the STM32 powered and driven from the Pi. The
+Pi's own PWM was disabled so the STM32 was the only trigger source:
+
+| STM32 setting | Pi camera measured |
+|---|---|
+| `pol 1` @ 30 Hz | **30.000 fps**, sd 0.01 ms |
+| `pol 1` @ 10 Hz | **10.000 fps**, sd 0.00 ms |
+| `pol 0` @ 10 Hz | **10.000 fps**, sd 0.00 ms |
+
+**The STM32's trigger output is fine.** It drives a known-good IMX296 to exact rate lock. Nothing
+about the MCU, its timer, its drive level or its wiring harness is implicated.
+
+**Polarity is settled by exposure, not by rate.** Both polarities rate-lock, because the sensor sees
+edges at the same frequency either way — which is why §9a's "tried `pol 0` and `pol 1`, no frames"
+could never have discriminated them. Brightness does: at the same commanded 5 ms and fixed gain,
+`pol 0` → max pixel **117**, `pol 1` → max pixel **11**. **`pol 0` (idle LED ON, exposure while the
+LED is OFF) is correct**, confirming §9a's corrected reading and matching the Pi's own PWM
+convention (idle HIGH, pulse LOW).
+
+⚠ **This invalidates the port‑D test above.** §9a wired `A0` to **port C**, and port C's module was
+later moved to the Pi *with the trigger lead still on it*. So when port D was tested on the TX2, the
+STM32 was pulsing into the module that had been relocated to the Pi — **port D never had a trigger
+wire attached**. The `PXL_SOF syncpt timeout` there is fully explained by an absent signal, and is
+not evidence against the TX2 driver.
+
+**What remains genuinely unexplained is only §9a's original port‑C failure**, where the wire *was*
+attached. That same module now triggers correctly on the Pi. Remaining differences, in order:
+
+1. **`always-on` has no TX2 equivalent.** The Pi needs `dtoverlay=imx296,always-on` precisely
+   because otherwise the camera *"clamps I/Os such as XTRIG to 0V"*. The vendor circuit ties the
+   optocoupler's phototransistor collector to **`DOVDD`**, so the opto cannot drive `FSIN`/`XTRIG`
+   unless the module's digital rail is up. Whether the J106 rail is continuously powered, or gated
+   around streaming, has never been checked. **This is now the leading hypothesis.**
+2. Polarity: §9a's six combinations included `pol 0`, so this is unlikely — but note the STM32
+   resets to `pol 1` on every power cycle, so a `pol 0` setting does not survive re-powering.
+
+**Port D driven from the Pi's PWM — still no frames (2026‑08‑27).** With the topology swapped
+(Pi camera ← STM32 `A0`; TX2 port D ← Pi `GPIO18`/`GND`), port D still produced zero frames and
+`PXL_SOF syncpt timeout`. The Pi's `GPIO18` was verified genuinely driving: `pinctrl` reports
+`alt5` claimed by `2020c000.pwm`, and 24 level samples gave **hi=20 / lo=4 = 83 %** against the
+commanded 85 % duty.
+
+**Full sensor register diff, both in trigger mode, read live over I²C** (Pi bus 10 @0x1a working;
+TX2 bus 2 @0x18 failing):
+
+| Reg | Pi (works) | TX2 (fails) | |
+|---|---|---|---|
+| `300b` TRIGEN | `0x01` | `0x01` | same |
+| `30ae` LOWLAGTRG | `0x01` | `0x01` | same |
+| `3000`/`300a` STANDBY/XMSTA | `0x00`/`0x00` | `0x00`/`0x00` | same |
+| `3014` HMAX | `0x044c` | `0x044c` | same |
+| `3089`–`308c` INCKSEL0‑3 | `b0 0f b0 0c` | `b0 0f b0 0c` | same — **both correctly on 54 MHz INCK** |
+| `4114`/`418c`/`4182` magic | `0xc5`/`0xa8`/`0x0440` | `0xc5`/`0xa8`/`0x0440` | same |
+| `3022`/`309c`/`3254` | `0x01`/`0x04`/`0x3c` | `0x01`/`0x04`/`0x3c` | same |
+| `3036` SYNCSEL | `0xc0` | `0xf0` | differs |
+| `3010` VMAX | 2249 | 1118 | differs |
+| `308d` SHS1 | 1913 | 14 | differs |
+| `3212` GAINDLY | `0x09` | `0x08` | differs (gain delay; cannot stop frames) |
+
+**Every difference was then individually falsified on the working Pi rig:**
+
+| Difference | How tested | Result |
+|---|---|---|
+| `SYNCSEL = 0xF0` | written while stopped so it persists into the stream (**a true at‑start test** — the stock driver never writes `0x3036`) | 30.000 fps, sd 0.01 ms — **innocent** |
+| `VMAX = 1118` | mid-stream **and** at stream start (`--framerate 60` yields VMAX 1124) | 30.000 fps at start; mid-stream 29.869 fps but **jitter sd 0.02 → 2.20 ms** — innocent for frame production, **real defect for timing** |
+| `SHS1 = 14` | written mid-stream during a working triggered capture | 30.000 fps before and after — **innocent** |
+
+Note `SHS1` is nonetheless a genuine deviation: the RPi driver writes `SHS1` **unconditionally**
+(`trigger_mode` appears only in `imx296_stream_on()`), whereas `0003`'s `set_exposure()` returns
+early without writing it when triggered. It does not stop frames, but it is not what the reference
+does.
+
+**Where this leaves the diagnosis.** The trigger source is proven (drives a known-good camera, pin
+verified toggling). The polarity is proven. The TX2's sensor register state is functionally
+equivalent to a rig that works — every difference tested and cleared. Yet the TX2 produces nothing,
+on **two different modules** (port C in §9a, port D now), while one of those very modules triggers
+correctly on the Pi.
+
+§9a additionally *measured* 10 mA flowing through port C's opto LED on the TX2, so the LED was
+genuinely driven there. LED driven + sensor armed + no frames = the fault is on the optocoupler's
+**output** side, inside the module, where it cannot be probed — yet that same module's opto output
+demonstrably reaches `XTRIG` when the module sits on the Pi.
+
+### ROOT CAUSE FOUND — `0x30af` must be `0x0b`, not `0x09` (2026‑08‑27)
+
+**A one-byte error in patch `0002`\'s `imx296_mode_common[]` table silently disables external
+trigger.** Everything else — sensor, modules, trigger source, polarity, wiring, CSI, VI — was
+correct all along.
+
+Found by mechanically diffing the two drivers\' init tables (the thing that should have been done
+first). Both have **41 entries**; they differ in **exactly one**:
+
+```
+RPi imx296_init_table:   { 0x30af, 0x0b }
+TX2 imx296_mode_common:  { 0x30af, 0x09 }     <-- the bug
+```
+
+`0x30af` sits **immediately adjacent to `0x30ae` = LOWLAGTRG**, the fast-trigger enable. Live
+readback confirmed the divergence on the hardware: Pi `0x30af = 0x0b`, TX2 `0x30af = 0x09`, with
+`LOWLAGTRG = 0x01` on both.
+
+**Proof.** With the sensor streaming free-running and capturing normally, `0x30af`, `TRIGEN` and
+`LOWLAGTRG` were written over I²C mid-stream, every write verified by readback:
+
+```
+BEFORE: 30af=0x09  300b=0x00  30ae=0x00     296 frames in 5 s = 59 fps (free-running)
+AFTER : 30af=0x0b  300b=0x01  30ae=0x01
+frames 385 -> 686 over 10 s  ==>  30 fps    syncpt timeouts: 1 (the transition only)
+```
+
+The sensor dropped from its free-run 59 fps to **exactly the 30 Hz trigger rate**. The identical
+sequence with `0x30af = 0x09` stops frames dead (295 -> 298 -> 298, then only `PXL_SOF` timeouts) —
+that is the entire failure this investigation chased.
+
+⚠ **Always read back i2c writes in this test.** One run appeared to disprove the fix; it had a write
+that silently did not land. With readback it reproduces every time.
+
+**Fixed** in `patches/0002-imx296-tegracam-j106.patch`; the two init tables are now byte-identical.
+Requires a kernel rebuild + deploy (the driver is built into `Image`, not a module).
+
+**VERIFIED WORKING RANGE — 5 Hz to 59 Hz (2026‑08‑27).** With the fixed kernel (`#8`, `LABEL
+j106fix`) and trigger mode selected the normal way (`trigger_mode=1`, no I²C pokes):
+
+| STM32 | Measured | syncpt timeouts |
+|---|---|---|
+| 59 Hz | **59.08–59.40 fps** | 0 |
+| 30 Hz | **30.00 fps** | 0 |
+| 20 Hz | **20.00 fps** | 0 |
+| 10 Hz | **10.01 fps** | 0 |
+| 5 Hz | **5.00 fps** | 1 (marginal — see below) |
+
+⚠ **An earlier claim in this section that "low trigger rates fail" was WRONG and has been removed.**
+It came from testing 10 Hz via mid-stream I²C pokes on the *unfixed* kernel, which leaves the sensor
+in an indeterminate state. On the fixed kernel 10 Hz locks exactly with zero timeouts. **There is no
+VMAX problem and no frame-rate-derived timeout** — that guess was wrong too. The VI timeout is a flat
+hardcoded constant:
+
+```
+vi4_fops.c:1089:   chan->timeout = msecs_to_jiffies(200);
+```
+
+**200 ms, fixed.** That sets the practical floor: at 5 Hz the 200 ms trigger period equals the
+timeout exactly, so it works but logs the occasional recovery. Below ~5 Hz it will fail. The ceiling
+is the sensor's own 59.95 fps (`tTGPD` 1126 H).
+
+**Why this took so long — worth internalising.** The failure was invisible to every method used:
+the register *state* looked right (`TRIGEN=1`, `LOWLAGTRG=1`), the driver flow was identical to
+free-running, the modules and trigger sources all proved good in isolation, and no error message
+ever named the real cause. Only a **mechanical diff of the complete init tables** found it. Hand-
+picking 26 "relevant" registers to compare was the mistake — `0x30af` was never on that list.
+
+**`discontinuous_clk` — a REAL defect, found and fixed (2026‑08‑27).** The IMX296 nodes declared
+`discontinuous_clk = "no"` (clock continuous). In trigger mode the sensor's MIPI output is
+intermittent, so that declaration was wrong. Changing **only** the four IMX296 nodes to `"yes"`
+(the ten IMX219 nodes untouched — they are a separate macro) **eliminated every D-PHY/CIL error**:
+
+| Error type | `"no"` | `"yes"` |
+|---|---|---|
+| `CILA_ERR_INTR_STATUS 0x0f` | present, interleaved | **zero** |
+| `CILA_INTR_STATUS` | present | **zero** |
+| `PXL_SOF syncpt timeout` | present | still present |
+
+Free-running is unaffected (60/60 frames, 0 timeouts). Deployed as `/boot/j106imx296-disco.dtb`
+under `LABEL j106disco`, with `LABEL j106trig` intact as fallback. **Keep this fix** — it is correct
+independently of the trigger fault.
+
+**Complete error signatures** (whole `dmesg`, normalised and counted — not a truncated `head`):
+
+```
+trigger_mode=0 -> frames=60
+    1  streaming: free-running            <- the ENTIRE log. zero errors.
+
+trigger_mode=1 -> frames=0
+   94  PXL_SOF syncpt timeout! err = -N
+   94  tegra_channel_error_recovery
+    1  streaming: EXTERNAL TRIGGER
+```
+
+**THE DECISIVE TEST — arming TRIGEN mid-stream.** With the sensor streaming free-running and
+capturing normally, `TRIGEN` and `LOWLAGTRG` were written over I²C *while frames were flowing*,
+with the STM32 pulsing at 30 Hz:
+
+| | frames |
+|---|---|
+| before arming | 295 |
+| after arming | 298 (+3) |
+| 5 s later | 298 (no change) |
+
+Readback confirmed `TRIGEN=0x01`. **Frames stopped dead.** The receiver was demonstrably healthy one
+second earlier, so this is not a VI/NVCSI problem. The sensor entered trigger mode and halted
+waiting for an edge that never came.
+
+**Conclusion: the sensor never receives an XTRIG edge while the module is on the TX2.** The absence
+of *any* D-PHY, CIL or CHANSEL error corroborates it — the sensor is not transmitting malformed or
+mistimed data, it is transmitting nothing at all. Every software hypothesis is now exhausted and
+individually falsified; what remains is physical, on the optocoupler's output side, and it must be
+measured rather than inferred.
+
+⚠ **Process note.** The CIL errors disappearing was visible in the very output that reported the
+test, and was missed because the run was judged on "frames: still zero" alone. Compare **complete,
+counted error signatures between configurations**, not the head of a log — the `sigcap.sh` approach
+above is the one to use.
+
+**MODULE SWAP DONE — both modules are good (2026‑08‑27).** Port D's module was moved to the Pi and
+tested with the Pi's own PWM:
+
+| Condition | PWM | Measured |
+|---|---|---|
+| Triggered | 30 Hz | **30.025 fps**, sd 0.01 ms |
+| Triggered | 10 Hz | **10.000 fps**, sd 0.00 ms |
+| Trigger OFF *(control)* | 10 Hz still running | **30.014 fps** — ignores the pulses |
+
+**Both modules — the one that failed on port C (§9a) and the one that failed on port D — trigger
+correctly on the Pi.** No module-level explanation survives. Combined with the register diff above
+(every difference individually falsified) and the identical driver flow between working and failing
+modes, nothing on the sensor or in the TX2 driver accounts for the failure.
+
+⚠ **But there is a physical puzzle that must be resolved before blaming "the TX2 platform".** The
+`XTR±` pads are **on the module**, and the trigger lead lands on them directly — the J106 carrier,
+its CSI connector and the TX2 itself are **not in the trigger signal path at all**. So a genuine
+platform fault could only act through (a) the sensor's register configuration, which has been
+verified identical to a working rig, or (b) module power state. That leaves **the physical
+connection at the TX2 end** as the most probable remaining variable, despite §9a having measured
+10 mA through port C's LED at the time. These are small SMD pads; a pressure or clip contact that
+measures fine statically can still fail, and the lead has been moved repeatedly.
+
+**Next test, once the TX2's i2c is recovered:** with a module fitted and probing on the TX2, land
+the *same physical lead* that has just been proven to work on the Pi, without re-terminating it, and
+retest. If that still yields nothing, the contradiction is real and worth escalating; if it works,
+the whole affair was contact integrity.
+
+**TX2 i2c state after the swap.** The newly fitted port C module does not respond at all:
+`imx296 2-001a: i2c write failed, 0x3000 = 0` ×5 → `failed to leave standby (-121)` → `board setup
+failed`. Bus 2 scans **completely empty** and only `/dev/video0`/`/dev/video1` (both bus 7) exist.
+This is the documented address-shifter mis-latch: **only removing power clears it — `reboot` does
+not.** Note the Pi is powered from the TX2, so cutting TX2 power cold-cycles both.
+
+**The decisive experiment is now a module swap, not more software:** fit the module that is proven
+to trigger (currently on the Pi) onto the TX2's port D connector, and land the same Pi `GPIO18`/`GND`
+lead on *its* `XTR+`/`XTR−`. That reduces everything to one variable:
+- **Still no frames** → the fault is the TX2 platform (something outside the sensor registers), and
+  every module-level explanation is eliminated.
+- **Frames** → port D's module has a dead `XTR` path, exactly like the dead `XVS` pad §9a found —
+  i.e. these breakout pads are unreliable per-module and must be verified individually.
+
+**Next test:** land `A0`/`GND` on the **port D** module's `XTR+`/`XTR−`, set `pol 0`, and repeat.
+That is now a one-variable experiment: every other element in the chain has been independently
+proven on the Pi.
+
+Two fixes worth making to `0003` regardless, neither of them the root cause:
+1. **Drop the `SYNCSEL` write** — it is not in the reference driver and is unjustified.
+2. **Stop pinning VMAX to the bare minimum** — 1118 costs 100× frame-timing jitter on a rig whose
+   entire purpose is timing. Track the trigger period the way the RPi driver does (its VMAX equals
+   the frame period exactly: 2249 × 14.8148 µs = 33.32 ms at 30 fps).
+
+Also noted while cross-reading: §9a's I²C readback table lists **`0x3002` XMSTA**, but `XMSTA` is
+`CTRL0A` at **`0x300a`**. If that is only a typo in the table, ignore it; if `0x3002` is what was
+actually read, then master-operation release was never confirmed and that reading should be redone.
 
 ### Free-running baseline, in full
 
