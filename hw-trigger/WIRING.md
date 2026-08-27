@@ -551,6 +551,38 @@ capture. No reboot, no reflash, no DTB change.
 Port C wired (`A0` → `XTR+`, `GND` → `XTR−`). **No frames in any configuration.** The drive side
 and the sensor side each verify correct; the link between them does not.
 
+**Vendor reference circuit** — InnoMaker `CAM-IMX296RAW` manual §2.5.1, kept alongside as
+`hw-trigger/CAM-IMX296RAW-UserManual-V2.0.pdf`. Their trigger connector is `J3` (`TRIG+`/`TRIG−`,
+spec **"3.3 V–5.0 V External Trigger Input"**):
+
+```
+  DOVDD ──── 4 ┃ PS2901-1 ┃ 1 ──── R4 200R ──── J3-1  TRIG+
+                ┃   opto   ┃
+  FSIN ─────── 3 ┃         ┃ 2 ──────────────── J3-2  TRIG−
+    │
+   R5 10k
+    │
+   GND
+```
+
+Two consequences, **if our module matches this circuit**:
+
+1. The output is an **emitter follower with a pull-DOWN**, not open-collector with a pull-up.
+   LED on ⇒ `FSIN` HIGH; LED off ⇒ R5 pulls it LOW. `XTRIG` being active-low, **the exposure
+   happens while the LED is OFF**.
+2. Therefore **`pol 0` is correct and `pol 1` is the unsafe idle** — the reverse of §4.1's reasoning.
+   The vendor's own script confirms it: `gpioset 23=1` for ~2 s (idle), then `23=0` for 3.3 ms (the
+   exposure). Idle HIGH, pulse LOW.
+
+⚠ §4.1 argues `pol 1` is the safe default because "idle-LED-off cannot hold a sensor inside an
+exposure". **For this circuit that is backwards** — idle-LED-off *is* the exposing state. Flagged
+rather than rewritten, because it is unconfirmed that our module has this circuit: ours carries
+`MAS`/`XVS`/`XHS` pads this board lacks entirely, and its `XVS` reads dead while streaming.
+
+`pol 0` was tested at 5 ms/30 fps, 20 ms/5 fps and 100 ms/2 fps regardless — no frames. So this does
+not resolve the failure; it does confirm our method matches the vendor's documented one, including
+the 3.3 V drive level.
+
 **Isolation re-verified 2026‑08‑27** — with the trigger wires *disconnected* and everything powered
 off, probing from each pad to carrier ground (which reaches the module through the CSI ribbon):
 
