@@ -409,22 +409,76 @@ that the MCU shares **no** ground with the cameras. The echo does not break that
 MCU to the **TX2**, not to a camera, and the MCU↔TX2 ground is *already* common through the serial
 control link (§4.2, currently in use on `/dev/ttyTHS1`). So the echo adds no new ground path.
 
-**Timestamp the echo from the KERNEL stamp, not from the wake-up.** This is the opposite of what
-`j106-imu-read.py` does for the IMU, and deliberately so:
+**Timestamp the echo exactly the way `j106-imu-read.py` timestamps the IMU** — wait on the chardev
+edge, then take your own `CLOCK_MONOTONIC`. Do **not** use the chardev's kernel stamp here. The
+reason is worth writing down, because the intuition points the wrong way:
 
-- For the **IMU** the chardev's own timestamp is discarded because it is `CLOCK_REALTIME` while
-  everything else is `CLOCK_MONOTONIC` — so the tool waits on the edge and takes its own
-  `CLOCK_MONOTONIC`, paying a **~50 µs** median wake-up latency (measured, README §5a.3).
-- For the **echo** that 50 µs would land straight in Δ and **would not cancel**, because the camera
-  side of the comparison is a kernel V4L2 timestamp, not a userspace wake-up. So here, use the
-  chardev's kernel IRQ timestamp and convert it: read `CLOCK_REALTIME` bracketed between two
-  `CLOCK_MONOTONIC` reads at the moment of capture, exactly as `--latency` already does. The
-  conversion is good to well under 1 µs, against 50 µs of wake-up bias avoided.
+Work in `CLOCK_MONOTONIC` throughout, and let
 
-Then Δ = (echo edge, converted to `CLOCK_MONOTONIC`) − (that frame's fitted exposure midpoint).
+| | |
+|---|---|
+| `T` | true time of the trigger edge |
+| `C = T + t_exp/2 + e` | camera-reported exposure midpoint; `e` is our constant/fit error |
+| `I = S + w` | IMU-reported sample time; `w` is the ~50 µs wake-up latency |
+
+`j106-record-sync.py` writes the camera column as `C + Δ` and the IMU column as `I`. For both to sit
+the same distance from truth — which is all that matters, since only their *difference* is used —
+we need `e + Δ = w`, i.e.
+
+```
+    Δ = w − e
+```
+
+Now compare the two ways of timestamping the echo:
+
+```
+  wake method    E_wake − (C − t_exp/2) = (T + w) − (T + e) = w − e = Δ   ✅ exactly Δ
+  kernel stamp   E_kern − (C − t_exp/2) =  T      − (T + e) =    − e     ❌ leaves w uncorrected
+```
+
+So the wake-up latency **must** be in the measurement: it is the same `w` the IMU pays, and putting
+the echo through the identical path is precisely what makes it cancel. Using the kernel stamp would
+measure only the camera pipeline error and leave Δ short by ~50 µs.
+
+A pleasant consequence: `w` never has to be known separately, and the *precision* of Δ is set by the
+wake **jitter** (MAD 2.8 µs), not the wake latency. Average over N echo edges and that falls as
+1/√N — a thousand edges gives Δ to ~0.1 µs.
+
+> ⚠ **One assumption to verify, not assume.** The IMU's `INT` is on the **AON** controller
+> (`gpiochip1`, `tegra-gpio-aon`) while `gpio-389` is on the **main** controller — different IRQ
+> paths, so `w` need not be identical on the two lines. The scheduler wake dominates and is common,
+> so any difference should be small, but check it rather than trust it: run the `--latency`
+> measurement on the echo line and confirm the distribution matches the IMU line's (median 50.4 µs,
+> MAD 2.8 µs). Any systematic difference between them lands directly in Δ.
+
+Taking the kernel stamp **as well** is still worth doing, not for Δ but to decompose it: the wake
+method gives `w − e` and the kernel stamp gives `−e`, so together they separate the camera pipeline
+error from the IMU wake bias and tell you whether the readout/exposure constants are right.
+
 Report the mean **and** the spread; and re-measure at two commanded exposures to check whether Δ
 depends on exposure (it should not, since the pulse *starts* the exposure, but the readout offset
 is what the fit walks back through — so this is worth confirming rather than assuming).
+
+#### If you have no resistors
+
+**The 1.0k/1.2k values are not magic.** Anything landing between the pad's `VIH` (~1.17 V) and the
+1.8 V rail works, and the divider ratio is all that matters — not the absolute values. So **two
+identical resistors of any value from ~1 kΩ to ~47 kΩ** give 3.3/2 = **1.65 V**, which is comfortably
+inside the window. Two 10 kΩ resistors, the most common value in existence, are fine. Below ~1 kΩ
+you start loading `PA0` needlessly; above ~47 kΩ the edge slows as it charges the wire capacitance.
+
+If there is genuinely nothing to hand, in preference order:
+
+1. **Route B (below).** Zero hardware, and you need the solver for extrinsics anyway. Realistically
+   ~0.1–1 ms on Δ against the echo's ~1 µs — but see the note there on whether that matters.
+2. **Open-drain drive + the Tegra's internal pull-up.** `GPIO_PQ5_PI5` (pin 69) is
+   `(MUX UNCLAIMED) (GPIO UNCLAIMED)`, and Tegra186 pads support an internal pull-up
+   (`nvidia,pull = <2>`). Configure `PA0`'s echo tap as **open-drain** on the STM32 and let the
+   internal pull-up provide the 1.8 V high — no external components at all. Measure the **falling**
+   edge, which the STM32 drives hard; the rising edge is slow because a weak internal pull-up
+   (tens of kΩ) has to charge the wire. Cost: this needs a DTB change and a reboot, which is more
+   work than a resistor but is well-trodden here (§6 in the README, reversible via an `extlinux`
+   `LABEL`).
 
 #### Route B — estimate it with a calibration solver (no hardware)
 
