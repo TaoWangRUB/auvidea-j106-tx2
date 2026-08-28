@@ -864,6 +864,99 @@ rather than AE estimates — and since all four share one edge, one `t_mid` serv
 ⚠ `nvarguscamerasrc` GstBuffer PTS is **output-stamped** (~0.7 ms, transport only), *not* SOF —
 it looks like a capture timestamp and is not one. The RTP path discards capture time entirely.
 
+## 5a. Camera ⟷ IMU timebase — one clock, and the three ways you cannot get it
+
+The hardware trigger (Stage 8) put the four cameras on one crystal. This section is about putting
+the cameras and the **onboard MPU‑9250** on one *timebase*, which is a different problem: the
+sensors now agree with each other, but not yet with the IMU, and not with `CLOCK_MONOTONIC`.
+
+Status: the three tools below are **written and tested offline**; the live measurements marked
+"to measure" are pending. OpenSpec change `add-camera-imu-sync`.
+
+### 5a.1 The chain, and which clock each link speaks
+
+| Link | Timestamp | Clock | Error |
+|------|-----------|-------|-------|
+| Trigger edge → sensor exposure | `t_exp = t_pulse + 14.26 µs` (+ opto `skew`) | STM32 crystal | pulse width *is* the exposure |
+| Exposure → V4L2 buffer stamp | `+ readout 16.1 ms` (`EndOfFrame`) | **`CLOCK_MONOTONIC`** | per‑frame jitter 1.5 µs sd |
+| Buffer stamp → `DQBUF` returns | `+ 66.7 ms` | — | **delivery latency, not a timestamp correction** |
+| IMU sample ready → `INT` edge | data‑ready pulse on `gpio-298` | — | + DLPF group delay (below) |
+| `INT` edge → userspace wake | `poll()` return | **`CLOCK_MONOTONIC`**, taken by us | *to measure* — `j106-imu-read.py --latency` |
+| Camera ⟷ IMU | **Δ** | — | *to measure* — trigger echo, or Kalibr |
+
+Both ends are deliberately `CLOCK_MONOTONIC`, because that is what V4L2 stamps buffers with
+(flag `0x00002001`, verified).
+
+**The frame times are fitted, not read.** The trigger is hardware‑periodic, so frame times lie on a
+line: fit `t[k] = a·k + b` **indexed by the V4L2 `sequence` field**. With 1.5 µs of independent
+jitter the phase error falls as 1/√N — about 0.06 µs over 600 frames. Indexing by arrival order
+instead of `sequence` is not a small error: a single dropped frame in 600 shifts the fitted period
+by ~5800 ppm. The slope `a` is the trigger period *in Tegra clock units*, which is what absorbs the
+next fact.
+
+**The STM32 free‑runs against the Tegra.** Measured frame interval **33332.5 µs** against a
+commanded 33333 µs ⇒ **≈ −15 ppm**, i.e. the rig walks ~50 ms per hour against `CLOCK_MONOTONIC`.
+So a camera↔IMU offset calibrated once as a constant **goes stale**; the fit is what keeps it valid.
+
+**The MPU‑9250's DLPF adds group delay, and adds a different one to each half.** The data‑ready edge
+marks when the *filtered* sample was ready, so the instant it describes is earlier by the group
+delay. At every matched bandwidth setting the **gyro lags the accel by ≈1.0 ms**:
+
+| `DLPF_CFG` | gyro BW / delay | `A_DLPF_CFG` | accel BW / delay |
+|---|---|---|---|
+| 1 | 184 Hz / 2.9 ms | 1 | 218 Hz / 1.88 ms |
+| 2 | 92 Hz / 3.9 ms | 2 | 99 Hz / 2.88 ms |
+| 3 | 41 Hz / 5.9 ms | 3 | 45 Hz / 4.88 ms |
+
+A front end that treats one timestamp as covering both inherits that 1.0 ms. `j106-imu-read.py`
+records both delays in the CSV header rather than silently applying them.
+
+### 5a.2 The three designs this hardware cannot support
+
+Each is the obvious way to do it, and each is a dead end **here** — recorded so they are not
+attempted again:
+
+1. **MPU‑9250 `FSYNC`** — the textbook trick (feed the camera trigger to `FSYNC`, let the IMU tag
+   its own samples with the frame) — **is not brought out by the J106**. The IMU pin table has only
+   `AD0/SDO`, `SDA/SDI`, `SCL/SCLK`, `/CS`, `INT`.
+2. **Tegra GTE hardware GPIO timestamping** — `gpio-tegra186.c` has the hooks
+   (`tegra_gpio_timestamp_control`, the `use-timestamp` DT property), but the pin table is
+   `tegra194_gte_info[]` **only**: GTE is **Xavier‑only**. `CONFIG_TEGRA_HTS_GTE` is off and neither
+   GPIO node declares it.
+3. **The GPIO chardev's own event timestamp** — it is **`CLOCK_REALTIME`**
+   (`gpiolib.c:730`, `ge.timestamp = ktime_get_real_ns()`), while V4L2 is `CLOCK_MONOTONIC`. Mixing
+   them misdates everything by the REALTIME↔MONOTONIC offset, and NTP can slew one under you. Use
+   the chardev to **wait** for the edge, then take your own `clock_gettime(CLOCK_MONOTONIC)`.
+   (`j106-imu-read.py --latency` is the one place the chardev stamp is used at all — comparing it
+   against our own read is precisely what measures the wake‑up latency.)
+
+So: wake userspace on the edge and stamp it there. That is the best this board allows, and
+`--latency` is what puts a number on the cost.
+
+### 5a.3 Δ — the one remaining constant
+
+After the fit, exactly one unknown is left: the offset between the camera timebase and the IMU
+timebase. It is a **single** constant, not four, because all four cameras share one trigger edge.
+Two routes, both documented in `hw-trigger/WIRING.md`:
+
+- **Measure it** — echo the trigger into `gpio-389` (M110 `J21` pin 8) and compare the echo edge to
+  the frame's fitted time. ⚠ `gpio-389` is **1.8 V unbuffered**: the 3.3 V trigger needs a
+  1 kΩ/1.2 kΩ divider. This is the one place on this rig where the level problem still applies —
+  the camera trigger pads themselves are optocouplers and do not.
+- **Estimate it** — let Kalibr solve for `td` from a recording. No extra wiring.
+
+Until one of those happens, `j106-record-sync.py` writes `delta_us = 0` **and** records
+`"delta_source": "UNMEASURED — assumed zero"`, so no recording can quietly imply a calibration it
+does not have.
+
+### 5a.4 Tools
+
+| Tool | What it does |
+|------|--------------|
+| `tools/j106-imu-read.py` | MPU‑9250 stamped on the data‑ready edge; `--latency` measures edge→wake |
+| `tools/j106-frametime.py` | the `t[k] = a·k + b` fit; refuses to fit free‑running cameras |
+| `tools/j106-record-sync.py` | both on one clock, EuRoC/ASL layout, provenance in `meta.json` |
+
 ## 6. Build, apply the patch & flash
 
 Builds run on an **x86‑64 Linux host**; artifacts deploy to the TX2 **over SSH**. Deployment is **always
