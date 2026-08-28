@@ -85,12 +85,22 @@
 
 ## 4. Camera-to-IMU offset (Δ)
 
-- [ ] 4.1 Document both routes in the wiring guide: measure Δ with a trigger echo, or estimate it
-      with a calibration solver and no extra hardware
-- [ ] 4.2 Trigger echo wiring — `gpio-389` (M110 `J21` pin 8), ⚠ **1.8 V unbuffered**, so specify
-      the 1 kΩ/1.2 kΩ divider from the 3.3 V trigger
-- [ ] 4.3 Measure Δ: compare echo edge time to the frame's fitted time; report mean and spread
-- [ ] 4.4 Check whether Δ depends on commanded exposure; record the answer
+- [x] 4.1 Document both routes in the wiring guide: measure Δ with a trigger echo, or estimate it
+      with a calibration solver and no extra hardware — **done**: `hw-trigger/WIRING.md` §4.4,
+      including which to use and why having the direct measurement is what tells you whether the
+      solver converged sensibly
+- [x] 4.2 Trigger echo wiring — `gpio-389` (M110 `J21` pin 8), ⚠ **1.8 V unbuffered**, so specify
+      the 1 kΩ/1.2 kΩ divider from the 3.3 V trigger — **done**: `WIRING.md` §4.4 with the tap
+      point (`PA0`, the real edge rather than a copy), the divider arithmetic (3.3 × 1.2/2.2 =
+      1.80 V against a ~1.17 V VIH), the 1.5 mA extra load on a 25 mA pin, and `gpio-389`
+      **verified free on the live board**. Two things recorded that are easy to get wrong: the
+      echo adds no new ground path (MCU↔TX2 ground is already common through the serial link,
+      unlike the opto-isolated camera side), and the echo must be timestamped from the kernel's
+      IRQ stamp — the opposite of the IMU rule — because the ~50 µs wake-up bias would otherwise
+      land straight in Δ and would not cancel against a kernel V4L2 stamp
+- [ ] 4.3 Measure Δ: compare echo edge time to the frame's fitted time; report mean and spread —
+      **blocked on the physical wire** (one tap + two resistors, `WIRING.md` §4.4)
+- [ ] 4.4 Check whether Δ depends on commanded exposure; record the answer — **blocked on 4.3**
 
 ## 5. Combined recorder (`tools/j106-record-sync.py`)
 
