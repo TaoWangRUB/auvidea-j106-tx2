@@ -45,6 +45,7 @@ import ctypes
 import errno
 import fcntl
 import glob
+import math
 import os
 import select
 import statistics
@@ -453,7 +454,7 @@ def open_imu(args):
 
 
 def summarise(intervals_ns, nominal_ns, latencies_ns, drops, late_reads,
-              clipped, clock_cost_ns, out=sys.stderr):
+              clipped, clock_cost_ns, accel_mean=None, out=sys.stderr):
     def line(txt):
         print(txt, file=out)
 
@@ -480,6 +481,20 @@ def summarise(intervals_ns, nominal_ns, latencies_ns, drops, late_reads,
                      % (len(clean), len(intervals_ns), len(intervals_ns) - len(clean)))
         else:
             line("rate error       not measurable - every interval spans a gap")
+    if accel_mean:
+        g = math.sqrt(sum(a * a for a in accel_mean))
+        line("gravity check    |a| = %.3f m/s^2 at rest  (expect ~9.81)" % g)
+        # Orientation cannot change the MAGNITUDE, so a few percent here is the
+        # part's uncalibrated zero-g offset (+-60 mg typical = +-0.6 m/s^2),
+        # not a wrong scale factor - a wrong full-scale selection would be out
+        # by a factor of two. It is exactly what a VIO/Kalibr calibration
+        # estimates, so it is reported, not corrected.
+        err_mg = abs(g - G_MS2) / G_MS2 * 1000.0
+        line("                 %.0f mg from 1 g — %s" % (
+            err_mg,
+            "within the MPU-9250's uncalibrated zero-g offset (+-60 mg typ)"
+            if err_mg < 150 else
+            "MORE than the part's spec — check the full-scale setting"))
     line("dropped samples  %d  (gaps in the edge series)" % drops)
     line("late reads       %d  (>1 edge already queued when we woke)" % late_reads)
     if clipped:
@@ -489,21 +504,32 @@ def summarise(intervals_ns, nominal_ns, latencies_ns, drops, late_reads,
         lat = sorted(l / 1000.0 for l in latencies_ns)      # us
         def pct(p):
             return lat[min(len(lat) - 1, int(p * (len(lat) - 1)))]
+        med = statistics.median(lat)
+        mad = statistics.median([abs(x - med) for x in lat])
         line("")
         line("---- edge -> userspace wake-up latency " + "-" * 26)
         line("(kernel IRQ timestamp vs our CLOCK_MONOTONIC read, %d samples)"
              % len(lat))
-        line("median %.1f us   mean %.1f us   sd %.1f us"
-             % (statistics.median(lat), statistics.mean(lat), statistics.pstdev(lat)))
-        line("p95 %.1f   p99 %.1f   max %.1f us" % (pct(0.95), pct(0.99), lat[-1]))
-        line("measurement floor: one clock_gettime call costs ~%.0f ns, and the"
-             % clock_cost_ns)
-        line("REALTIME/MONOTONIC offset is bracketed by two MONOTONIC reads, so")
-        line("the systematic error here is well under 1 us.")
+        line("median %.1f us    MAD %.2f us" % (med, mad))
+        line("min %.1f  p25 %.1f  p75 %.1f  p95 %.1f  p99 %.1f  max %.1f us"
+             % (lat[0], pct(0.25), pct(0.75), pct(0.95), pct(0.99), lat[-1]))
+        # A single scheduling outlier in a few thousand samples moves the sd by
+        # more than the entire body of the distribution does, so the sd is
+        # reported next to the MAD rather than instead of it.
+        line("mean %.1f us  sd %.1f us  <- sd is outlier-dominated; prefer MAD"
+             % (statistics.mean(lat), statistics.pstdev(lat)))
         line("")
-        line("This latency is JITTER, not bias, for fusion purposes: the median")
-        line("is a constant that calibration absorbs; the spread is what")
-        line("actually limits the IMU timestamp.")
+        line("Measurement floor: one clock_gettime call costs ~%.1f us here"
+             % (clock_cost_ns / 1000.0))
+        line("(ctypes into the vDSO, on this CPU). That cost does NOT enter the")
+        line("figures above: the REALTIME read is bracketed between two MONOTONIC")
+        line("reads and dated to their midpoint, which cancels the call cost to")
+        line("first order and leaves only the asymmetry between the two calls.")
+        line("")
+        line("This latency is mostly BIAS, not jitter: the median is a constant")
+        line("that the camera<->IMU offset absorbs, and the MAD is what actually")
+        line("limits the IMU timestamp. Run under SCHED_FIFO (chrt -f 80) - it")
+        line("cuts the tail by about half and barely moves the median.")
     line("-" * 64)
 
 
@@ -531,6 +557,8 @@ def capture(args, out_fh):
         nominal_ns = int(1e9 / info["rate_hz"])
         timeout_ms = max(50, int(8 * nominal_ns / 1e6))
         stats = Stats()
+        asum = [0.0, 0.0, 0.0]
+        nsamp = 0
         deadline = now_ns() + int(args.duration * 1e9) if args.duration else None
 
         def stop():
@@ -544,6 +572,9 @@ def capture(args, out_fh):
                             vals[5], vals[6], seq))
             if args.flush:
                 out_fh.flush()
+            for i in range(3):
+                asum[i] += vals[i]
+            nsamp += 1
             if args.count and seq + 1 >= args.count:
                 break
 
@@ -554,7 +585,8 @@ def capture(args, out_fh):
                      "rising" if info["edge"] == "falling" else "falling"),
                   file=sys.stderr)
         summarise(stats.intervals, nominal_ns, stats.latencies, stats.drops,
-                  stats.late, stats.clipped, clock_cost)
+                  stats.late, stats.clipped, clock_cost,
+                  accel_mean=[a / nsamp for a in asum] if nsamp else None)
         return 0
     finally:
         mpu.standby()
