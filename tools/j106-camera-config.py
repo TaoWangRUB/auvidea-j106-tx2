@@ -220,8 +220,11 @@ def main():
         raise SystemExit("port(s) listed as both families: %s" % ",".join(sorted(p296 & p219)))
     layout = {p: ("imx296" if p in p296 else "imx219") for p in PORTS}
 
-    tag = "".join(p.lower() if layout[p] == "imx296" else "" for p in sorted(PORTS)) or "none"
-    tag = "cam296-" + (tag if tag != "none" else "none")
+    # Label names the population. An all-IMX219 board is the stock tree, so it
+    # gets its own name rather than "cam296-none", which reads as a failed
+    # IMX296 build rather than a deliberate IMX219 one.
+    ports296 = "".join(p.lower() for p in sorted(PORTS) if layout[p] == "imx296")
+    tag = "cam296-" + ports296 if ports296 else "cam219"
     print("Requested population")
     for p in sorted(PORTS):
         bus, busno, csi, pos, _ = PORTS[p]
