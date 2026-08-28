@@ -997,9 +997,12 @@ timebase. It is a **single** constant, not four, because all four cameras share 
 Two routes, both documented in `hw-trigger/WIRING.md`:
 
 - **Measure it** — echo the trigger into `gpio-389` (M110 `J21` pin 8) and compare the echo edge to
-  the frame's fitted time. ⚠ `gpio-389` is **1.8 V unbuffered**: the 3.3 V trigger needs a
-  1 kΩ/1.2 kΩ divider. This is the one place on this rig where the level problem still applies —
-  the camera trigger pads themselves are optocouplers and do not.
+  the frame's fitted time, timestamping the echo **the same way the IMU is timestamped** so the
+  ~50 µs wake-up latency is common mode and cancels (the derivation is in `WIRING.md` §4.4; taking
+  the kernel stamp instead measures the wrong quantity). ⚠ `gpio-389` is **1.8 V unbuffered**: the
+  3.3 V trigger needs a divider — any **two equal resistors** (1 kΩ–47 kΩ) give 1.65 V, which is
+  fine. This is the one place on this rig where the level problem still applies; the camera trigger
+  pads themselves are optocouplers and do not.
 - **Estimate it** — let Kalibr solve for `td` from a recording. No extra wiring.
 
 Until one of those happens, `j106-record-sync.py` writes `delta_us = 0` **and** records
