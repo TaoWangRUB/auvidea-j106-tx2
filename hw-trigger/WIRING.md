@@ -370,12 +370,82 @@ ever want a proper level translator's B-side supply instead of the §3.4 divider
 > "1. to be added" — the `J21`/`J22`/`J23` pinouts above are from the M100 sections of that shared
 > document. Confirm the connector exists and count pins before soldering.
 
-### 4.4 Optional — trigger echo back to the TX2 (future)
+### 4.4 Optional — trigger echo back to the TX2, to measure Δ
 
-Not part of this change. If you later want kernel-timestamped trigger edges, `GPIO11_AP_WAKE_BT`
-(gpio **389**, M110 `J21` pin 8) is free and unclaimed — but it is a **1.8 V unbuffered** input, so
-it needs the same treatment as §3.4 in reverse. `GNSS_PPS` (`J21` pin 7) is the semantically nicer
-pin if it maps to a Tegra GPIO on TX2.
+After the frame-time fit (README §5a) exactly **one** unknown is left in the camera↔IMU chain: the
+constant offset **Δ** between the camera timebase and the IMU timebase. It is a single constant,
+not four, because all four cameras expose on the same edge. There are two ways to get it, and the
+cheap one needs no hardware at all.
+
+#### Route A — measure it directly with a trigger echo (one wire + two resistors)
+
+Feed one trigger channel back into a Tegra GPIO, timestamp the edge, and compare it with the
+frame's *fitted* time. This measures Δ rather than assuming it.
+
+```
+  PA0 (P2-17) --+--------------------------------> Trig+  CSI-C   (unchanged)
+                |
+                +--[ 1.0k ]--+--[ 1.2k ]--GND      divider: 3.3 V x 1.2/2.2 = 1.80 V
+                             |
+                             +----------> gpio-389  (M110 J21 pin 8)  ⚠ 1.8 V
+```
+
+| Item | Value | Why |
+|---|---|---|
+| Tap point | `PA0` / P2‑17 | the **real** trigger edge, not a copy from another pin |
+| `R1` | **1.0 kΩ** to `PA0` | with `R2`, divides 3.3 V down to 1.8 V |
+| `R2` | **1.2 kΩ** to `GND` | 3.3 × 1.2/(1.0+1.2) = **1.80 V** |
+| To | **`gpio-389`** (`GPIO11_AP_WAKE_BT`), M110 `J21` pin 8 | verified free and unclaimed on the live board |
+| Extra load on `PA0` | 3.3 V / 2.2 kΩ = **1.5 mA** | on top of the 10.3 mA opto current; the pin's limit is 25 mA |
+
+> ### ⚠ `gpio-389` is 1.8 V **unbuffered** — do not connect 3.3 V to it
+> This is the one place on this rig where the level problem still applies. The camera trigger pads
+> are optocouplers and are indifferent to voltage (§3), which makes it easy to forget that the
+> Tegra side is not. 1.8 V logic on TX2 needs `VIH ≥ ~1.17 V`, so 1.80 V has comfortable margin
+> while staying under the 1.8 V rail. **Never** wire `PA0` straight to `J21` pin 8.
+
+**Grounding is already handled** — and this is worth stating, because §3 spends a page explaining
+that the MCU shares **no** ground with the cameras. The echo does not break that: it connects the
+MCU to the **TX2**, not to a camera, and the MCU↔TX2 ground is *already* common through the serial
+control link (§4.2, currently in use on `/dev/ttyTHS1`). So the echo adds no new ground path.
+
+**Timestamp the echo from the KERNEL stamp, not from the wake-up.** This is the opposite of what
+`j106-imu-read.py` does for the IMU, and deliberately so:
+
+- For the **IMU** the chardev's own timestamp is discarded because it is `CLOCK_REALTIME` while
+  everything else is `CLOCK_MONOTONIC` — so the tool waits on the edge and takes its own
+  `CLOCK_MONOTONIC`, paying a **~50 µs** median wake-up latency (measured, README §5a.3).
+- For the **echo** that 50 µs would land straight in Δ and **would not cancel**, because the camera
+  side of the comparison is a kernel V4L2 timestamp, not a userspace wake-up. So here, use the
+  chardev's kernel IRQ timestamp and convert it: read `CLOCK_REALTIME` bracketed between two
+  `CLOCK_MONOTONIC` reads at the moment of capture, exactly as `--latency` already does. The
+  conversion is good to well under 1 µs, against 50 µs of wake-up bias avoided.
+
+Then Δ = (echo edge, converted to `CLOCK_MONOTONIC`) − (that frame's fitted exposure midpoint).
+Report the mean **and** the spread; and re-measure at two commanded exposures to check whether Δ
+depends on exposure (it should not, since the pulse *starts* the exposure, but the readout offset
+is what the fit walks back through — so this is worth confirming rather than assuming).
+
+#### Route B — estimate it with a calibration solver (no hardware)
+
+Kalibr's camera-IMU calibration solves for a time offset `td` alongside the extrinsics. Record with
+`j106-record-sync.py`, feed the EuRoC output in, and read `td` off the result. No wiring, and it
+also gives the spatial extrinsics you need anyway — but it is only as good as the target, the
+motion excitation and the solver's convergence, and it cannot be checked against anything.
+
+#### Which to use
+
+Do **both** if the wire is cheap: Route A is a direct measurement with a known error budget, which
+makes it the reference; Route B is what you would have to trust otherwise, so having A is what
+tells you whether B converged sensibly. If only one, Route B costs nothing and is usually enough
+for VIO, since a residual offset error mostly inflates the estimated bias rather than breaking
+tracking.
+
+⚠ Whichever route, until Δ is actually measured `j106-record-sync.py` records
+`"delta_source": "UNMEASURED — assumed zero"`. Do not quietly replace that with a guess.
+
+`GNSS_PPS` (`J21` pin 7) is the semantically nicer pin for the echo if it maps to a Tegra GPIO on
+TX2 — unverified, whereas `gpio-389` has been checked on the live board.
 
 ---
 
