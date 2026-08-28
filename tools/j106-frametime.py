@@ -47,6 +47,15 @@ _spec = importlib.util.spec_from_file_location(
 scheck = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scheck)
 
+# The clock plumbing lives in j106-imu-read.py; reuse it rather than keeping a
+# second ctypes binding for the same two syscalls.
+_ispec = importlib.util.spec_from_file_location(
+    "imuclock", os.path.join(HERE, "j106-imu-read.py"))
+imuclock = importlib.util.module_from_spec(_ispec)
+_ispec.loader.exec_module(imuclock)
+
+CLOCK_MONOTONIC_RAW = 4
+
 # ---- measured pipeline constants ------------------------------------------
 # All from the hardware-trigger bring-up on IMX296 @1456x1088 (README §5
 # Stage 8 §11). They are properties of this sensor at this mode - re-measure if
@@ -59,6 +68,50 @@ RAW_DELIVERY_MS = 66.7          # buffer stamp -> DQBUF returns; a DELIVERY
                                 # inherent, not queue depth)
 
 TRIGGER_MODE_SYSFS = "/sys/module/imx296/parameters/trigger_mode"
+
+
+class ClockSlew:
+    """Measures how far CLOCK_MONOTONIC is being slewed during a run.
+
+    V4L2 stamps buffers with CLOCK_MONOTONIC, which NTP DOES discipline - only
+    CLOCK_MONOTONIC_RAW is free of it. On this board systemd-timesyncd was
+    found slewing MONOTONIC by ~48 ppm, which is far larger than the crystal
+    difference the fit is trying to report, and its servo adjusting that rate
+    is what makes the fit residual wander by tens of us over tens of seconds.
+
+    It does NOT harm the camera<->IMU offset: both series are stamped on the
+    same slewed clock, so the slew is common mode and cancels in the
+    difference. What it corrupts is any statement about RATE.
+    """
+
+    def __init__(self):
+        self.m0 = imuclock.now_ns(imuclock.CLOCK_MONOTONIC)
+        self.r0 = imuclock.now_ns(CLOCK_MONOTONIC_RAW)
+
+    def ppm(self):
+        dm = imuclock.now_ns(imuclock.CLOCK_MONOTONIC) - self.m0
+        dr = imuclock.now_ns(CLOCK_MONOTONIC_RAW) - self.r0
+        if dr <= 0:
+            return None
+        return (dm - dr) / dr * 1e6
+
+    @staticmethod
+    def ntp_daemon():
+        for name in ("systemd-timesyncd", "ntp", "chrony", "chronyd"):
+            try:
+                with open("/run/systemd/units/invocation:" + name):
+                    return name
+            except OSError:
+                pass
+        try:
+            import subprocess
+            out = subprocess.run(["systemctl", "is-active", "systemd-timesyncd"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            if out.stdout.strip() == b"active":
+                return "systemd-timesyncd"
+        except OSError:
+            pass
+        return None
 
 
 def fit_line(seqs, times):
@@ -113,13 +166,34 @@ def sqrt_n_table(seqs, times, out=sys.stdout):
     print("\n  phase uncertainty vs frame count (should track 1/sqrt(N))",
           file=out)
     print("    %8s %14s %14s" % ("N", "measured", "ideal"), file=out)
+    ratios = []
     for s in sizes:
         f = fit_line(seqs[:s], times[:s])
         if not f:
             continue
         ideal = full["resid_sd"] / math.sqrt(s)
+        # V4L2 stamps are quantised to 1 us, so a short prefix can land exactly
+        # on the line and fit "perfectly". That is a degenerate case, not
+        # evidence of anything, so it does not vote.
+        if ideal > 0 and f["phase_se"] * 1e6 > 0.01:
+            ratios.append((s, f["phase_se"] / ideal))
         print("    %8d %11.3f us %11.3f us"
               % (s, f["phase_se"] * 1e6, ideal * 1e6), file=out)
+    # Averaging only beats sqrt(N) if the residuals are independent. If short
+    # prefixes fit far BETTER than the ideal curve, the residuals are
+    # correlated - the phase is wandering slowly rather than jittering - and
+    # the fit is describing a line the data does not actually follow.
+    # One deviating prefix is noise; two or more is a pattern.
+    low = [r for _, r in ratios if r < 0.5]
+    if len(low) >= 2:
+        print("\n  NOTE: short prefixes fit %.1fx better than independent "
+              "jitter allows." % (1.0 / max(min(low), 1e-3)), file=out)
+        print("  The residuals are correlated, i.e. the phase WANDERS rather "
+              "than jitters,", file=out)
+        print("  so the quoted phase error is optimistic. Expected when free-"
+              "running; if the", file=out)
+        print("  trigger is on, suspect a drifting reference rather than a "
+              "noisy one.", file=out)
 
 
 def trigger_mode():
@@ -160,9 +234,11 @@ def check_triggered(live):
         ref = live[0]
         worst_skew = worst_rate = 0.0
         for other in live[1:]:
-            sk = scheck.nearest_skew(ref.stamps, other.stamps)
+            ts, sk = scheck.nearest_skew(ref.stamps, other.stamps)
+            if not sk:
+                continue
             worst_skew = max(worst_skew, max(abs(s) for s in sk))
-            worst_rate = max(worst_rate, abs(scheck.drift_rate(ref.stamps, sk)))
+            worst_rate = max(worst_rate, abs(scheck.drift_rate(ts, sk)))
         span = ref.stamps[-1] - ref.stamps[0]
         notes.append("worst inter-camera skew %.1f us, drift %.2f us/s over %.1f s"
                      % (worst_skew * 1e6, worst_rate * 1e6, span))
@@ -245,6 +321,7 @@ def main():
 
         print("streaming %d frames from %s ..."
               % (args.frames, ", ".join(c.name for c in opened)))
+        slew = ClockSlew()
         threads = [threading.Thread(target=c.run, args=(args.frames,))
                    for c in opened]
         for t in threads:
@@ -255,6 +332,7 @@ def main():
         for c in opened:
             c.close()
 
+    slew_ppm = slew.ppm()
     for c in opened:
         if c.error:
             print("%s: capture error: %s" % (c.name, c.error), file=sys.stderr)
@@ -286,6 +364,7 @@ def main():
                             "readout_ms": READOUT_MS, "isp_ms": ISP_MS,
                             "raw_delivery_ms": RAW_DELIVERY_MS},
               "exposure_model": model, "cameras": {}}
+    result["clock_monotonic_slew_ppm"] = slew_ppm
 
     print("\nfit  t[k] = a*k + b   (k = V4L2 sequence, t = CLOCK_MONOTONIC)")
     print("  %-10s %6s %7s %14s %11s %11s %11s"
@@ -318,10 +397,43 @@ def main():
     if args.trigger_hz:
         print("\nSTM32 vs Tegra rate (commanded %.4f Hz = %.3f us)"
               % (args.trigger_hz, 1e6 / args.trigger_hz))
+        # A rate that differs by percent is not a clock offset, it is a
+        # different rate - quoting it in ppm would dress a wrong --trigger-hz
+        # (or a sensor still in its free-running mode) up as a drift figure.
+        MAX_SANE_PPM = 10000.0                     # 1%
         for name, e in result["cameras"].items():
-            print("  %-10s %+8.2f ppm   the rig walks %+.1f ms per hour "
-                  "against CLOCK_MONOTONIC"
-                  % (name, e["rate_offset_ppm"], e["walk_ms_per_hour"]))
+            if abs(e["rate_offset_ppm"]) > MAX_SANE_PPM:
+                print("  %-10s fitted %.4f fps, commanded %.4f — that is a "
+                      "DIFFERENT RATE,\n%13s not a clock offset, so no ppm "
+                      "figure is meaningful here."
+                      % (name, e["fps"], args.trigger_hz, ""))
+                e["rate_offset_ppm_suppressed"] = e.pop("rate_offset_ppm")
+                e.pop("walk_ms_per_hour", None)
+            else:
+                print("  %-10s %+8.2f ppm   the rig walks %+.1f ms per hour "
+                      "against CLOCK_MONOTONIC"
+                      % (name, e["rate_offset_ppm"], e["walk_ms_per_hour"]))
+        if slew_ppm is not None:
+            print("  NTP slew of CLOCK_MONOTONIC during this run: %+.2f ppm"
+                  % slew_ppm)
+            daemon = ClockSlew.ntp_daemon()
+            if abs(slew_ppm) > 1.0:
+                print("  ^ V4L2 stamps with CLOCK_MONOTONIC, which NTP DOES "
+                      "discipline%s." % (" (%s active)" % daemon if daemon else ""))
+                print("    So the ppm above is crystal difference PLUS slew; "
+                      "the crystal part is")
+                for name, e in result["cameras"].items():
+                    if "rate_offset_ppm" in e:
+                        print("      %-10s %+8.2f ppm" %
+                              (name, e["rate_offset_ppm"] - slew_ppm))
+                        e["rate_offset_ppm_deslewed"] = (e["rate_offset_ppm"]
+                                                         - slew_ppm)
+                print("    and the servo re-adjusting that slew is what makes "
+                      "the fit residual")
+                print("    wander. Stop the daemon for a clean rate figure; "
+                      "leave it for normal use —")
+                print("    the slew is common mode between camera and IMU, so "
+                      "it cancels in Delta.")
         print("  This is why a camera<->IMU offset is a fit, not a constant: a"
               "\n  fixed offset calibrated once goes stale at exactly this rate.")
 

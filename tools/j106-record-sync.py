@@ -202,6 +202,7 @@ def main():
               % (args.duration, frames, ", ".join(c.name for c in opened),
                  "" if args.no_imu else " + IMU @ %.0f Hz" % args.rate))
         t0 = time.time()
+        slew = ft.ClockSlew()
         threads = [threading.Thread(target=c.run, args=(frames,))
                    for c in opened]
         for t in threads:
@@ -209,6 +210,7 @@ def main():
         for t in threads:
             t.join()
         wall = time.time() - t0
+        slew_ppm = slew.ppm()
     finally:
         if worker is not None:
             worker.stop_flag.set()
@@ -252,6 +254,11 @@ def main():
                     "exposure_us": args.exposure_us,
                     "skew_us": args.skew_us,
                     "checks": notes, "problems": problems},
+        # V4L2 and the IMU are both stamped on CLOCK_MONOTONIC, which NTP
+        # disciplines, so this slew is COMMON MODE and cancels in Delta. It is
+        # recorded because it does corrupt any rate figure derived from the fit.
+        "clock_monotonic_slew_ppm": slew_ppm,
+        "ntp_daemon": ft.ClockSlew.ntp_daemon(),
         "delta_us": args.delta_us,
         "delta_source": args.delta_source or ("UNMEASURED — assumed zero"
                                               if args.delta_us == 0 else "user"),
@@ -266,6 +273,13 @@ def main():
             "describes)"),
         "cameras": {}, "imu": None,
     }
+
+    if slew_ppm is not None and abs(slew_ppm) > 1.0:
+        print("\nCLOCK_MONOTONIC slew during this run: %+.2f ppm%s"
+              % (slew_ppm, " (%s active)" % ft.ClockSlew.ntp_daemon()
+                 if ft.ClockSlew.ntp_daemon() else ""))
+        print("  Common mode between camera and IMU, so it cancels in Delta — "
+              "but it does\n  corrupt the fitted rate. Recorded in meta.json.")
 
     print("\nper camera")
     for i, c in enumerate(live):

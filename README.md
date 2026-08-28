@@ -870,8 +870,9 @@ The hardware trigger (Stage 8) put the four cameras on one crystal. This section
 the cameras and the **onboard MPU‑9250** on one *timebase*, which is a different problem: the
 sensors now agree with each other, but not yet with the IMU, and not with `CLOCK_MONOTONIC`.
 
-Status: the three tools below are **written and tested offline**; the live measurements marked
-"to measure" are pending. OpenSpec change `add-camera-imu-sync`.
+Status: **verified on the live board 2026‑08‑28** — IMU reader, frame‑time fit and the combined
+recorder all run end to end under the hardware trigger. The one remaining unknown is **Δ**, which
+needs the trigger‑echo wire (§5a.5). OpenSpec change `add-camera-imu-sync`.
 
 ### 5a.1 The chain, and which clock each link speaks
 
@@ -881,7 +882,7 @@ Status: the three tools below are **written and tested offline**; the live measu
 | Exposure → V4L2 buffer stamp | `+ readout 16.1 ms` (`EndOfFrame`) | **`CLOCK_MONOTONIC`** | per‑frame jitter 1.5 µs sd |
 | Buffer stamp → `DQBUF` returns | `+ 66.7 ms` | — | **delivery latency, not a timestamp correction** |
 | IMU sample ready → `INT` edge | data‑ready pulse on `gpio-298` | — | + DLPF group delay (below) |
-| `INT` edge → userspace wake | `poll()` return | **`CLOCK_MONOTONIC`**, taken by us | *to measure* — `j106-imu-read.py --latency` |
+| `INT` edge → userspace wake | `poll()` return | **`CLOCK_MONOTONIC`**, taken by us | **median 50 µs, MAD 2.8 µs** (SCHED_FIFO); p99 75 µs |
 | Camera ⟷ IMU | **Δ** | — | *to measure* — trigger echo, or Kalibr |
 
 Both ends are deliberately `CLOCK_MONOTONIC`, because that is what V4L2 stamps buffers with
@@ -894,9 +895,12 @@ instead of `sequence` is not a small error: a single dropped frame in 600 shifts
 by ~5800 ppm. The slope `a` is the trigger period *in Tegra clock units*, which is what absorbs the
 next fact.
 
-**The STM32 free‑runs against the Tegra.** Measured frame interval **33332.5 µs** against a
-commanded 33333 µs ⇒ **≈ −15 ppm**, i.e. the rig walks ~50 ms per hour against `CLOCK_MONOTONIC`.
-So a camera↔IMU offset calibrated once as a constant **goes stale**; the fit is what keeps it valid.
+**The STM32 free‑runs against the Tegra.** Measured over 900 triggered frames, the fitted period is
+**33334.03 µs** against a commanded 33333.33 µs. Taken at face value that is +21 ppm — but most of
+it is not the crystal at all, it is NTP (§5a.4). De‑slewed, the crystal difference is
+**−12.3 ppm**, reproducible to 0.07 ppm across runs whose raw figure differed by 3.7 ppm. Either
+way the rig walks against `CLOCK_MONOTONIC`, so a camera↔IMU offset calibrated once as a constant
+**goes stale**; the fit is what keeps it valid.
 
 **The MPU‑9250's DLPF adds group delay, and adds a different one to each half.** The data‑ready edge
 marks when the *filtered* sample was ready, so the instant it describes is earlier by the group
@@ -933,7 +937,60 @@ attempted again:
 So: wake userspace on the edge and stamp it there. That is the best this board allows, and
 `--latency` is what puts a number on the cost.
 
-### 5a.3 Δ — the one remaining constant
+### 5a.3 What waking on the edge actually costs (measured)
+
+`j106-imu-read.py --latency`, 3000 samples at 200 Hz, comparing the kernel's IRQ‑time
+`CLOCK_REALTIME` event stamp against our own `CLOCK_MONOTONIC` read:
+
+| | normal priority | `chrt -f 80` |
+|---|---|---|
+| median | 56.4 µs | **50.4 µs** |
+| MAD | — | **2.8 µs** |
+| p95 | 100.0 µs | 55.7 µs |
+| p99 | 122.7 µs | 75.4 µs |
+| rare tail | — | ~3.4 ms, roughly 1 in 3000 |
+
+**The median is bias, not error** — a constant that Δ absorbs. What limits the IMU timestamp is the
+**MAD, 2.8 µs**, which is the same order as the camera side's 1.5 µs frame jitter. Run under
+`SCHED_FIFO`: it halves the tail and barely moves the median.
+
+⚠ The `clock_gettime` call itself costs **~5.3 µs** here (ctypes into the vDSO on this CPU) — larger
+than the jitter being measured. It does not enter the figures because the `REALTIME` read is
+bracketed between two `MONOTONIC` reads and dated to their midpoint, which cancels the call cost to
+first order.
+
+Also measured, and reported by the tool rather than corrected: the accelerometer reads
+**|a| = 10.46 m/s² at rest**, i.e. 66 mg from 1 g. Orientation cannot change a magnitude, so that is
+the part's uncalibrated zero‑g offset (±60 mg typical) — exactly what a VIO/Kalibr calibration
+estimates. A wrong full‑scale selection would be out by a factor of two, not 7 %.
+
+### 5a.4 ⚠ NTP slews `CLOCK_MONOTONIC` — and it is the biggest term in the rate
+
+`CLOCK_MONOTONIC` is **not** free of NTP. Only `CLOCK_MONOTONIC_RAW` is. Measured on this board:
+
+```
+CLOCK_MONOTONIC is slewed +48.45 ppm relative to CLOCK_MONOTONIC_RAW
+```
+
+That is **four times larger** than the crystal difference the fit is trying to report, so a raw
+"STM32 vs Tegra" figure is mostly an NTP artefact. Two consequences, which behave differently:
+
+- **The static offset biases any RATE figure.** `j106-frametime.py` now measures the slew during
+  every run (`MONOTONIC` vs `MONOTONIC_RAW`) and reports the de‑slewed crystal figure alongside the
+  raw one. Validation: two runs whose raw figures were +24.57 and +20.90 ppm gave de‑slewed
+  −12.34 and −12.27 ppm.
+- **The servo re‑adjusting that slew makes the fit residual wander.** With `systemd-timesyncd`
+  running, the residual over 900 frames is **30.9 µs**, tracing a smooth ±60 µs arc (frame‑to‑frame
+  change only 3.25 µs — a wander, not jitter). Stop the daemon and the same fit gives **8.4 µs**.
+  Note that stopping it does **not** remove the static slew: the kernel keeps the last `adjtimex`
+  frequency correction, which still measured +33 ppm afterwards.
+
+**It does not harm Δ.** Both the V4L2 stamps and the IMU stamps are `CLOCK_MONOTONIC`, so the slew
+is common mode and cancels in the camera↔IMU difference. It corrupts statements about *rate*, not
+about *offset*. For a long calibration recording, stop `systemd-timesyncd` anyway — it cuts the fit
+residual by ~4×.
+
+### 5a.5 Δ — the one remaining constant
 
 After the fit, exactly one unknown is left: the offset between the camera timebase and the IMU
 timebase. It is a **single** constant, not four, because all four cameras share one trigger edge.
@@ -949,7 +1006,7 @@ Until one of those happens, `j106-record-sync.py` writes `delta_us = 0` **and** 
 `"delta_source": "UNMEASURED — assumed zero"`, so no recording can quietly imply a calibration it
 does not have.
 
-### 5a.4 Tools
+### 5a.6 Tools
 
 | Tool | What it does |
 |------|--------------|

@@ -153,19 +153,37 @@ def drift_rate(times, skews):
 
 
 def nearest_skew(ref, other):
-    """For each ref timestamp, signed offset to the closest frame in `other`.
+    """Signed offset from each ref timestamp to the closest frame in `other`.
+
+    Returns two PARALLEL lists (times, skews) - not just skews - because
+    dropping an unmatched pair would otherwise silently misalign the caller's
+    zip against ref.stamps and corrupt the drift regression.
 
     Matching by nearest time rather than by index deliberately: the four
     STREAMONs do not happen on the same edge, so cameras can be a whole frame
     apart in index while being perfectly synchronised in time.
+
+    Pairs further apart than half a frame period are DROPPED, not reported.
+    The two series rarely start and stop on the same frame, so at the ends the
+    nearest available partner can be a whole period away - which is not a skew
+    measurement, it is the absence of a partner. Left in, a single such pair
+    reported a whole 33.3 ms period as "worst skew" and failed a rig that was
+    in fact synchronised to 1 us.
     """
-    out = []
+    if len(ref) < 3 or not other:
+        return [], []
+    intervals = sorted(b - a for a, b in zip(ref, ref[1:]))
+    half_period = intervals[len(intervals) // 2] / 2.0
+    times, skews = [], []
     j = 0
     for t in ref:
         while j + 1 < len(other) and abs(other[j + 1] - t) <= abs(other[j] - t):
             j += 1
-        out.append(other[j] - t)
-    return out
+        skew = other[j] - t
+        if abs(skew) <= half_period:
+            times.append(t)
+            skews.append(skew)
+    return times, skews
 
 
 def main():
@@ -236,8 +254,11 @@ def main():
     worst = 0.0
     worst_rate = 0.0
     for c in live[1:]:
-        sk = nearest_skew(ref.stamps, c.stamps)
-        rate = drift_rate(ref.stamps, sk)
+        ts, sk = nearest_skew(ref.stamps, c.stamps)
+        if not sk:
+            print(f"  {c.name:<10}   no frame pairs within half a period")
+            continue
+        rate = drift_rate(ts, sk)
         mx = max(abs(s) for s in sk)
         worst = max(worst, mx)
         worst_rate = max(worst_rate, abs(rate))
