@@ -121,9 +121,12 @@
       README §5a.2, each with the evidence that settles it
 - [x] 6.3 Add the tools to `tools/README.md` with the "where this runs" convention — **done**:
       all three, each with its run-location banner
-- [ ] 6.4 Update the memory notes with the verified timebase facts — the dead ends and the
-      wiring facts are already recorded; the **measured** numbers (wake-up latency, Δ) go in
-      once the board is back
+- [x] 6.4 Update the memory notes with the verified timebase facts — **done**: wake-up latency,
+      the NTP slew and its two distinct effects, the triggered-vs-free-running residual, the
+      gravity check, and the `nearest_skew` artefact. Also **corrected** the stored "−15 ppm"
+      STM32-vs-Tegra figure, which was measuring the crystal difference through an uncontrolled
+      amount of NTP slew, and recorded that the trigger generator is on the board's
+      `/dev/ttyTHS1`, not a USB CDC port. Δ goes in once measured
 
 ## 7. Findings from the live bring-up (not anticipated by the plan)
 
