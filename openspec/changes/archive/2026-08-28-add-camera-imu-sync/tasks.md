@@ -98,9 +98,16 @@
       unlike the opto-isolated camera side), and the echo must be timestamped from the kernel's
       IRQ stamp — the opposite of the IMU rule — because the ~50 µs wake-up bias would otherwise
       land straight in Δ and would not cancel against a kernel V4L2 stamp
-- [ ] 4.3 Measure Δ: compare echo edge time to the frame's fitted time; report mean and spread —
-      **blocked on the physical wire** (one tap + two resistors, `WIRING.md` §4.4)
-- [ ] 4.4 Check whether Δ depends on commanded exposure; record the answer — **blocked on 4.3**
+- [~] 4.3 Measure Δ: compare echo edge time to the frame's fitted time; report mean and spread —
+      **DESCOPED from this repo (decision 2026-08-28)**. Δ will be obtained with Kalibr in the BEV
+      project instead, alongside the extrinsics that project needs anyway, since the offset is only
+      consumed by the VIO application. The trigger-echo route stays fully documented in
+      `WIRING.md` §4.4 as an optional direct cross-check — including the derivation of *why* the
+      echo must be timestamped through the same wake path as the IMU — but no tool here implements
+      it, and none is planned
+- [~] 4.4 Check whether Δ depends on commanded exposure; record the answer — **DESCOPED with 4.3**.
+      Kalibr solves a single `td` per recording, so if this matters it surfaces as a disagreement
+      between recordings made at different exposures
 
 ## 5. Combined recorder (`tools/j106-record-sync.py`)
 
@@ -137,6 +144,10 @@
       STM32-vs-Tegra figure, which was measuring the crystal difference through an uncontrolled
       amount of NTP slew, and recorded that the trigger generator is on the board's
       `/dev/ttyTHS1`, not a USB CDC port. Δ goes in once measured
+
+> **Δ is not measured in this repo.** Tasks 4.3/4.4 were descoped on 2026-08-28: Δ is obtained
+> with Kalibr in the BEV project, where it is consumed. Until a recording carries a measured value,
+> `j106-record-sync.py` writes `"delta_source": "UNMEASURED — assumed zero"`.
 
 ## 7. Findings from the live bring-up (not anticipated by the plan)
 
