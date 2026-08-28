@@ -76,34 +76,36 @@ timing information than any one sample.
 - **THEN** it SHALL be computed from the estimated frame time, the commanded exposure, and the known
   fixed sensor and interface delays
 
-### Requirement: The camera-to-IMU offset is a measured constant
+### Requirement: The camera-to-IMU offset is a single stated constant
 
-The residual offset between a camera's exposure and the IMU timebase SHALL be treated as one
-constant to be measured, and the means of measuring it SHALL be provided.
+The residual offset between a camera's exposure and the IMU timebase SHALL be treated as **one**
+constant for the whole rig rather than one per camera, and SHALL be stated with its provenance
+wherever synchronised data is recorded.
 
-#### Scenario: Offset can be measured directly
+#### Scenario: One constant covers every camera
 
-- **WHEN** a copy of the trigger signal is made available to the host as a timestamped event
-- **THEN** the offset between that event and the corresponding frame's timestamp SHALL be reported,
-  giving the constant directly
+- **WHEN** the cameras are driven by a shared trigger edge
+- **THEN** the residual camera-to-IMU offset SHALL be represented as a single value covering all
+  cameras, because a shared edge leaves no per-camera component to estimate
 
-#### Scenario: Offset can be estimated without extra hardware
+#### Scenario: Offset is obtained without extra hardware
 
 - **WHEN** no trigger echo is wired
-- **THEN** the documentation SHALL describe how to obtain the same constant by estimation from
-  recorded data, so the capability does not depend on optional hardware
-
-#### Scenario: A signal exceeding a pin's rating is not applied to it
-
-- **WHEN** the trigger echo is wired to a host input whose voltage domain is below the trigger
-  source's output level
-- **THEN** the documented wiring SHALL include level translation into that pin's domain
+- **THEN** the recorded output SHALL be in a form a calibration solver can consume, so the offset
+  can be estimated from motion, and the documentation SHALL describe that route
 
 #### Scenario: The offset is stated, not assumed
 
 - **WHEN** synchronised data is recorded
-- **THEN** the offset in use SHALL be recorded alongside it, so downstream consumers do not have to
-  infer whether it was applied
+- **THEN** the offset in use SHALL be recorded alongside it, and an offset that has not been
+  measured SHALL be marked as unmeasured rather than recorded as a value
+
+#### Scenario: The direct-measurement route is documented, including how it is timestamped
+
+- **WHEN** a trigger echo is used to obtain the offset directly
+- **THEN** the documentation SHALL specify that the echo is timestamped by the same path as the IMU,
+  so that the wake-up latency common to both cancels rather than entering the offset, and SHALL
+  include level translation into the target pin's voltage domain
 
 ### Requirement: Recorded output is usable by a motion-estimation pipeline
 
