@@ -1231,6 +1231,17 @@ Changing sensor family is never only the DT. `j106-camera-config.py` handles 1�
    tolerates far longer exposures (its DT allows up to 683 ms).
 4. **`/dev/videoN` indices shift.** Adding A/B pushes C–F from `video0..3` to `video2..5`. The grid
    tools resolve cameras by i²c name and are unaffected; anything of yours pinning node numbers is not.
+5. **Hardware trigger coverage** (§5 *Stage 8*) — **IMX296 only**. `imx296.trigger_mode=1` drives
+   every IMX296 that probes, so a port switched **to** IMX296 joins the triggered set and needs its
+   `XTR±` pair wired to a free STM32 `TIM5` channel (`PA0`–`PA3`, `WIRING.md` §4.1) or it will sit
+   in trigger mode with no pulses and produce **no frames at all**. A port switched **away** from
+   IMX296 leaves its STM32 channel spare and drops out of the synchronised set — so the acceptance
+   test's expected camera count changes with it. IMX219 has no trigger support: a mixed population
+   can only ever be synchronised across its IMX296 ports.
+6. **`jetson-clocks.service`** — not family-specific, but it scales with the *number* of cameras:
+   three concurrent streams collapse to ~12–18 fps with syncpt timeouts without it, while each
+   camera alone reaches 30 fps either way. `nvpmodel` MAXN is **not** enough. Adding ports to a
+   population is exactly when this starts to matter.
 
 ## 7. Status & open issues
 
