@@ -240,6 +240,22 @@ can carry its own exposure. No connection to camera ground anywhere.
 4 × 10.3 mA = 41 mA total, spread across four pins — each well inside the STM32's 25 mA per-pin
 limit.
 
+> ### ⚠ The header pin numbers above are the **MiniSTM32H7xx**'s, not the Black Pill's
+> The H7 has 2×22 headers; the **WeAct MiniSTM32F4x1** (STM32F401, the current MCU) has 2×20 with a
+> different layout. From its V3.1 schematic the trigger pins are all on **P1, and run backwards**:
+>
+> | Silkscreen | `A3` | `A2` | `A1` | `A0` |
+> |---|---|---|---|---|
+> | Black Pill **P1** pin | 12 | 13 | 14 | **15** |
+>
+> Four adjacent pins in one row — no zig-zag between columns like the H7. **Go by the silkscreen
+> letters, never by counting pin positions**, or the harness lands on the wrong nets when it moves
+> between boards.
+>
+> Also on this board: **`A0` doubles as the User KEY** (`PA0 —[R1 330 Ω]— SW1 — GND`). Harmless —
+> there is no capacitor on that net so the edge is unaffected, and pressing it while the pin drives
+> high sources only ~10 mA — but do not press it while measuring skew.
+
 ⚠ **The four channels zig-zag between the header's two columns.** `A0` and `A2` are odd-numbered
 (left column); `A1` and `A3` are even (right column). They occupy two adjacent rows, with a `GND` pin
 one row above `A0` — convenient, but easy to mis-count. See the pin map in §5 before soldering.
@@ -331,6 +347,13 @@ with defaults and starts on its own.
 | `USART1_TX` (`PA9`) | **`A9`** | P1‑27 | → | `UART2_RXD` | 3 |
 | `USART1_RX` (`PA10`) | **`A10`** | P1‑26 | ← | `UART2_TXD` | 2 |
 | `GND` | **`GND`** | P2‑43 | — | `GND` | 6 |
+
+> ⚠ **Those header pins are the H7's too** (see the box in §4.1). On the WeAct MiniSTM32F4x1 the
+> console pins are `PA9`/`PA10` on **P2**: `A9` = P2‑06, `A10` = P2‑07. Go by the silkscreen.
+> Mind the crossover — `A9` is the STM32's **TX** and goes to J22 pin 3 (`UART2_RXD`); `A10` is its
+> **RX** and takes J22 pin 2 (`UART2_TXD`). Given how the H7 died, put **220 Ω–1 kΩ in series** on
+> both signal lines: if the TX2 drives them while the MCU is unpowered, that resistor is the
+> difference between a clamp-limited trickle and a dead board.
 
 **Which `/dev/ttyTHS*` is `J22`?** → **`/dev/ttyTHS1`**, identified on the bench 2026‑08‑26 with the
 MCU attached and running: writing `status` to it at 115200 returned camtrig's report, and a limit
@@ -580,55 +603,281 @@ overall. Not recommended:
 - **No series resistors** — the module's own `R4 = 200 Ω` sets the current (§4.1). Only a supply
   above ~3.3 V needs external resistance.
 
-## 6. Firmware — build and flash
+## 6. Running the rig — every part, its script, its command
 
-See [`firmware/README.md`](firmware/README.md). In short:
+Each part of the rig has one script. They live in [`scripts/`](scripts/) unless noted, and each says
+**where it runs** — host or TX2 — because that is the easiest thing to get wrong.
+
+| Part | Script | Runs on |
+|---|---|---|
+| Firmware build + flash | `firmware-f401/Makefile` | host (build), TX2 (flash) |
+| Trigger control | `scripts/trig-send.sh` | TX2 |
+| Live 4-camera view | `scripts/sender.sh` + `scripts/receiver.sh` | TX2 + host |
+| Trigger acceptance test | `scripts/verify-trigger.sh` | TX2 |
+| Frame-rate only | `scripts/trig-recv.sh` | TX2 |
+| Sync measurement | `tools/j106-sync-check.py` | TX2 |
+| Multimeter probe mode | `scripts/trig-probe.sh` | TX2 |
+| UDP/network tuning | `scripts/net-tune.sh` | **both** |
+
+---
+
+### 6.1 Build the firmware — on the host
 
 ```bash
-cd hw-trigger/firmware && make          # arm-none-eabi-gcc -> build/camtrig.bin
-# hold BOOT0, tap NRST, release BOOT0  -> ROM DFU bootloader
-dfu-util -a 0 -s 0x08000000:leave -D build/camtrig.bin
+cd hw-trigger/firmware-f401
+make                       # -> build/camtrig-f401.bin   (~34 KB, 0 warnings)
 ```
 
-No debugger needed — the STM32 ROM bootloader provides USB DFU, and `dfu-util` is already on the
-build host.
+HAL + FreeRTOS + USB CDC, targeting the WeAct MiniSTM32F4x1 (STM32F401CEU6). Needs only
+`arm-none-eabi-gcc`. See [`firmware-f401/README.md`](firmware-f401/README.md) for what it is
+assembled from and the F4-vs-H7 traps.
 
-Two commands exist specifically for the optocoupler, both settable at runtime over the serial link:
+### 6.2 Flash over USB **without touching BOOT0**
+
+The F401 ROM speaks USB DFU, and the firmware has a `dfu` command that reboots into it. So a board
+already running this firmware reflashes with no buttons at all:
+
+```bash
+# on the HOST: stage the image where the TX2 can reach it
+scp hw-trigger/firmware-f401/build/camtrig-f401.bin nvidia@10.42.0.157:/tmp/
+
+# on the TX2:
+~/j106-trigctl.py --port /dev/ttyACM0 raw "dfu"     # or --port /dev/ttyTHS1
+sleep 3 && lsusb | grep 0483:df11                   # confirm it is in DFU
+dfu-util -a 0 -s 0x08000000:leave -D /tmp/camtrig-f401.bin
+```
+
+> ### ⚠ Do NOT send `dfu` unless the USB-C cable is plugged into a host
+> The command reboots the board into a **USB** bootloader. With the cable unplugged it leaves the
+> application, presents nothing on USB, stops answering the UART console, and is unreachable until
+> someone touches it. Confirm the cable first, every time.
+
+**Expected quirk — exit 74 is success.** ST's DfuSe bootloader resets on the leave request and never
+answers the final `get_status`, so `dfu-util` prints `Error during download get_status` and exits 74
+after a *completely successful* flash. Judge success by `0483:df11` **leaving the bus**, never by the
+exit code.
+
+**If the write fails at 0% (`libusb_control_transfer returned -1/-9`)** the bootloader is wedged —
+usually after an interrupted download. Software cannot clear it; re-enumeration does not either.
+Unplug and replug the USB-C, then enter DFU the hardware way: hold **BOOT0**, tap **NRST**, release
+BOOT0. A clean entry flashes first time.
+
+**Fallback with no working firmware:** hold **BOOT0**, tap **NRST**, release, then run the same
+`dfu-util` line.
+
+### 6.3 Drive the trigger — `scripts/trig-send.sh` (on the TX2)
+
+Wraps `j106-trigctl.py` and finds a working console by itself, trying `ttyTHS1`, then `ttyACM0`,
+then `ttyUSB0`.
+
+```bash
+./trig-send.sh status
+./trig-send.sh fps 30            # 5-59 Hz; below 5 Hz VI times out (see 9)
+./trig-send.sh exp 30000         # EXPOSURE IS THE PULSE WIDTH, in us
+./trig-send.sh pol 0             # the working polarity on this rig
+./trig-send.sh start | stop
+./trig-send.sh raw "burst 10"
+```
+
+`pol`, `skew` and `period` have no `j106-trigctl.py` subcommand of their own, so the script routes
+them through `raw`; `exp` maps to `exposure`. Set `TRIG_PORT` to force a port.
+
+> **ModemManager grabs `/dev/ttyACM0`** on the TX2 and probes it with AT commands. The symptoms are
+> `Device or resource busy` on open and `err unknown command` replies that are answers to *its*
+> traffic. Retrying works; the real fix is a udev rule marking `0483:5740` `ID_MM_DEVICE_IGNORE=1`.
+
+### 6.4 Watch all four cameras — `sender.sh` (TX2) + `receiver.sh` (host)
+
+```bash
+# on the TX2
+~/hwtrig-scripts/sender.sh 10.42.0.1        # HOST_IP; 10.42.0.1 = the eth link
+
+# on the HOST
+cd hw-trigger/scripts && ./receiver.sh      # 2x2 grid, labelled by port
+```
+
+Ports keep the BEV numbering (c=5002, d=5003, e=5004, f=5005), so
+`BEV/scripts/stream/csi_receiver.sh` receives this stream unchanged.
+
+Useful knobs: `FPS=5`, `PORTS_ONLY="c d"`, `W=`/`H=`/`BR=`, `FLIP=0`,
+`AE_LOCK=0` (hand AE back to Argus), `PORTS="c d"` and `SINK=fakesink` on the receiver.
+
+> ### ⚠ Backgrounding the receiver: never redirect stdin from `/dev/null`
+> `gst-launch-1.0 -e` treats EOF on stdin as a shutdown request and sends EOS ~2 ms after start, so
+> the grid dies instantly with only `Got EOS from element "pipeline0"` in the log. Use a stdin that
+> never EOFs:
+> ```bash
+> setsid nohup ./receiver.sh > /tmp/receiver.log 2>&1 < /dev/zero &
+> ```
+
+**Argus AE must be clamped, and the script does it for you.** In trigger mode exposure is the pulse
+width, so AE cannot move its main actuator and hunts on gain — a 3.47 Hz limit cycle, 150 luma
+peak-to-peak, seen as heavy flashing. `sender.sh` locks AE automatically when
+`trigger_mode=1`. Free-running it applies the clamp from `tools/grid-stream-host.sh`
+(`exposuretimerange` + `gainrange` + `ispdigitalgainrange`). **Clamping gain alone is not enough** —
+with exposure still free AE keeps hunting and the picture visibly pulses.
+
+### 6.5 Verify the trigger — `scripts/verify-trigger.sh` (on the TX2)
+
+The acceptance test. Each step removes a suspect, so a failure lands somewhere specific:
+
+```bash
+~/hwtrig-scripts/verify-trigger.sh 30 5      # target Hz, seconds per window
+```
+
+```
+0  preconditions   generator answering, four /dev/video* present
+1  free-run        trigger_mode=0 - proves sensors, CSI, VI and capture path
+2  triggered       trigger_mode=1 at pol 0
+3  polarity sweep  only if 2 failed
+```
+
+A pass in 1 and a fail in 2/3 means the fault is between the STM32 pin and the module `XTRIG` pad —
+*provided* the pins are actually driven (see the box in 6.7).
+
+Frame counts alone, no verdict:
+
+```bash
+~/hwtrig-scripts/trig-recv.sh 5                    # all four, 5 s
+~/hwtrig-scripts/trig-recv.sh 10 /dev/video0
+```
+
+### 6.6 Measure synchronisation — `tools/j106-sync-check.py` (on the TX2)
+
+```bash
+for v in 0 1 2 3; do v4l2-ctl -d /dev/video$v --set-ctrl bypass_mode=0; done
+~/j106-sync-check.py -n 200
+```
+
+Expected under a working trigger: **30.00 fps, 0 dropped, worst skew ~1.0 µs, drift ~0.00 µs/s,
+`verdict: SYNCHRONISED`.**
+
+> ### ⚠ Two things that will waste your time here
+> **Do not judge sync from the live RTP grid.** Each camera passes its own 100 ms
+> `rtpjitterbuffer` — a transport error ~50,000× the quantity being measured.
+>
+> **The grid and the sync check cannot run at the same time.** `bypass_mode=1` routes VI to the
+> ISP for Argus (the grid); `bypass_mode=0` gives raw V4L2 buffers (the sync check). Raw capture
+> with `bypass_mode=1` returns **zero bytes with no error**, which looks exactly like a dead camera.
+> Set it back to 1 before restarting the stream.
+
+### 6.7 Find where a pulse stops — `scripts/trig-probe.sh` (on the TX2)
+
+At 30 Hz / 5 ms a multimeter reads a meaningless ~0.5 V average. This sets **1 Hz with a 500 ms
+pulse** — ~50% duty, so a working pin reads ~1.6 V and visibly swings:
+
+```bash
+~/hwtrig-scripts/trig-probe.sh            # enter probe mode
+~/hwtrig-scripts/trig-probe.sh restore    # back to 30 fps / 5 ms
+```
+
+| Reading at the pin | Meaning |
+|---|---|
+| ~1.5–1.7 V swinging | driving — fault is downstream (wire, return, optocoupler) |
+| 0 V steady | not driving — wrong pin, trigger stopped, **or the firmware never muxed the pin** |
+| 3.3 V steady | stuck high — check polarity / `stop` state |
+
+⚠ Measure the module pads in **DIODE mode, never Ω mode**: `R4 = 200 Ω` in series with a 1.25 V LED
+reads OL both ways in resistance mode and looks like an open circuit.
+
+> ### ⚠ "0 V steady" is a firmware suspect before it is a wiring suspect
+> On 2026‑08‑31 the trigger produced **zero frames on all four cameras at every rate and both
+> polarities** while the timer ran, the update interrupt fired, the pulse counter advanced, the
+> status LED blinked at exactly the right rate and `status` reported healthy. The cause was in the
+> firmware: `HAL_TIM_MspPostInit()` was defined but **never called** — HAL does not call it, CubeMX
+> emits an explicit call at the end of `MX_TIMx_Init` — so `PA0`–`PA3` were never switched to
+> alternate function and no edge ever left the chip. Hours were spent on the harness, which was
+> fine. The GPIO setup now lives in `HAL_TIM_PWM_MspInit()`, which HAL *does* call.
+>
+> **Before suspecting wiring, put a meter on the STM32 pin itself** with `trig-probe.sh` running.
+> Every other symptom is identical between "pin not muxed" and "wire broken".
+
+### 6.8 Tune the network — `scripts/net-tune.sh` (on BOTH ends)
+
+```bash
+./net-tune.sh --show        # report only
+./net-tune.sh --persist     # apply + /etc/sysctl.d/99-j106-stream.conf
+```
+
+Four cameras at ~4 Mbit/s each is 1.6% of a gigabit link, so throughput is never the constraint —
+**burstiness is**. With `iframeinterval=15` all four can emit an I-frame in the same millisecond,
+and the stock 212992-byte socket buffer overruns on that, dropping packets silently as smeared
+video. The TX2 ships untuned. `rtph264pay mtu` already defaults to 1400, so there is no IP
+fragmentation to fix — a common non-problem.
+
+### 6.9 Two commands specific to the optocoupler
+
+Both are runtime, because the barrier hides them from this side:
 
 | Command | For |
 |---|---|
-| `pol <0\|1>` | Which way round the pulse drives the LED. `1` (default) = the pulse turns the LED **on**, so idle is LED-off. Use `0` if the module asserts `XTRIG` when the LED is *off*. |
-| `skew <ns>` | The opto's turn-on/turn-off delay asymmetry, subtracted from the pulse alongside the sensor's own 14.26 µs. Measure once per module type. |
+| `pol <0\|1>` | Which way the pulse drives the LED. **`pol 0` is the working value on this rig** — both polarities rate-lock, but `pol 1` silently yields *exposure = period − commanded*. |
+| `skew <ns>` | The opto's turn-on/turn-off delay asymmetry, subtracted from the pulse alongside the sensor's 14.26 µs. Identical across cameras, so it affects **absolute exposure only, never sync**. |
+
+### 6.10 Exposure is the pulse width — what that costs
+
+`exp` sets the XTRIG pulse, and the sensor exposes for exactly that. Measured chain:
+readout+MIPI→VI **16.1 ms**, ISP **1.9 ms**.
+
+| | 5 ms pulse | 30 ms pulse |
+|---|---|---|
+| Trigger edge → frame in hand | 23.0 ms | 48.0 ms |
+| **Age of the scene content** (exposure/2 + 18.0) | 20.5 ms | 33.0 ms |
+| Motion blur | 1× | **6×** |
+| Sync (skew) | 1.0 µs | 1.0 µs — unaffected |
+
+A global-shutter frame corresponds to its **exposure midpoint**, so `t_mid = t_SOF − exposure/2`.
+
+⚠ **Pass the same exposure to the analysis tools.** `j106-frametime.py --exposure-us` defaults to a
+different value; run it against a 30 ms pulse without saying so and every midpoint is wrong by
+12.5 ms — which lands straight in Δ, the camera↔IMU constant.
+
+The rate still holds at long exposures because the global shutter **pipelines**: frame *N* reads out
+while *N+1* exposes, so the limit is `max(exposure, readout) < period`, not the sum. The firmware
+refuses anything past `period − 1 ms` rather than dropping frames silently.
 
 ---
 
 ## 7. Bring-up order
 
-Each step is reversible and fails loudly rather than silently.
+Each step is reversible, fails loudly rather than silently, and names the script that performs it.
+All script paths are relative to [`scripts/`](scripts/); §6 says which machine each runs on.
 
-1. **Confirm LED polarity** on each module (diode mode; anode is the pad that conducts with the red
-   lead on it) and record it in §9.
-2. **Flash** the firmware (§6 — `make flash`, no BOOT0 press needed). With nothing connected, the
-   `PE3` LED blinks a steady **1 Hz** (0.5 s on, 0.5 s off): it toggles every 15 emitted pulses, so
-   the rate is derived from the real timer clock and a wrong clock tree is visible by eye. A *fast*
-   flash in repeating groups is a fault code, not the heartbeat — see `firmware/README.md`.
-   The **on-board TFT** shows rate, exposure and a live pulse count. `status` over USB
-   (`/dev/ttyACM*`) or `USART1` confirms clock source, period and per-channel pulse widths.
-3. **Check a channel before it meets a camera.** A DMM on DC across `PA0`→`GND` reads the average:
-   at 30 fps / 5 ms with the default active-high polarity that is `3.3 × 0.15 ≈ 0.5 V`. Reading
-   ~2.8 V instead means the polarity is inverted — fix with `pol` before wiring.
-4. **Wire one camera first** (§4.1) — two wires, no components — cameras still free-running
-   (`trigger_mode=0`).
-5. **Enable trigger mode** and confirm that one camera still delivers frames:
-   `echo 1 | sudo tee /sys/module/imx296/parameters/trigger_mode`, then restart capture. `dmesg`
-   must show `EXTERNAL TRIGGER`.
-   - **No frames?** Try `./j106-trigctl.py raw 'pol 0'` — the module may assert on LED *off*. If it
-     still fails, swap that camera's two wires (the LED may be reversed).
-6. **Calibrate the opto delay.** With a known commanded exposure, compare image brightness against
-   the same exposure free-running, or scope the module's `XVS` pad. Set the difference with
-   `./j106-trigctl.py raw 'skew <ns>'`.
-7. **Wire the remaining three**, then re-run `j106-sync-check.py`.
-8. **Count**: `./j106-trigctl.py burst 300` and confirm each camera delivered 300 frames.
+1. **Confirm LED polarity** on each module — **diode mode**, anode is the pad that conducts with the
+   red lead on it. Record it in §9.
+2. **Flash** the firmware — §6.2, no BOOT0 press needed:
+   ```bash
+   ~/j106-trigctl.py --port /dev/ttyACM0 raw "dfu"
+   dfu-util -a 0 -s 0x08000000:leave -D /tmp/camtrig-f401.bin
+   ```
+   With nothing connected the `PC13` LED blinks a steady **1 Hz**: it toggles every 15 emitted
+   pulses, so the blink rate is **fps ÷ 30** and is derived from the real timer clock — a wrong
+   clock tree is visible by eye with no instrument. A *fast* flash in repeating groups is a fault
+   code, not the heartbeat.
+   ⚠ The LED confirms the **timer**, not the **pins**. It blinked perfectly for hours while
+   `PA0`–`PA3` were unmuxed and no edge left the chip (§6.7).
+3. **Check a channel before it meets a camera** — `./trig-probe.sh` puts it at 1 Hz / 500 ms so a
+   DMM can read it. ~1.5–1.7 V swinging = driving; 0 V steady = not driving; 3.3 V steady = stuck
+   high. `./trig-probe.sh restore` when done. **Do this before wiring**, because every downstream
+   symptom is identical between "pin not muxed" and "wire broken".
+4. **Wire one camera** (§4.1) — two wires, no components — cameras still free-running.
+5. **Enable trigger mode** and confirm that camera still delivers:
+   ```bash
+   echo 1 | sudo tee /sys/module/imx296/parameters/trigger_mode
+   ./trig-recv.sh 5 /dev/video0
+   ```
+   - **No frames?** `./trig-send.sh pol 0` — the module may assert on LED *off*. Still nothing:
+     swap that camera's two wires (the LED may be reversed).
+6. **Calibrate the opto delay** with `./trig-send.sh skew <ns>`, comparing brightness against the
+   same commanded exposure free-running.
+7. **Wire the remaining three**, then run the acceptance test end to end:
+   ```bash
+   ./verify-trigger.sh 30 5        # free-run control, then triggered, then polarity sweep
+   ~/j106-sync-check.py -n 200     # needs bypass_mode=0; expect ~1.0 us, SYNCHRONISED
+   ```
+8. **Look at it** — `sender.sh` on the TX2, `receiver.sh` on the host (§6.4). Set the exposure wide
+   enough first (`./trig-send.sh exp 30000`), or a dim room reads as a trigger failure.
+9. **Count**: `./trig-send.sh raw "burst 300"` and confirm each camera delivered 300 frames.
 
 **Rollback at any point:** `echo 0 > /sys/module/imx296/parameters/trigger_mode` and restart
 capture. No reboot, no reflash, no DTB change.
