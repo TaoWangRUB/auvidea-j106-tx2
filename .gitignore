@@ -31,6 +31,7 @@ bsp-r32.2/*.dts
 bsp-r32.2/*.log
 __pycache__/
 hw-trigger/firmware/build/
+hw-trigger/firmware-f401/build/
 
 # ...but the firmware rollback image is deliberately tracked: build/ is ignored,
 # so this is the only copy of the pre-restructure trigger binary.
