@@ -53,6 +53,36 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim)
 	g.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
 	g.Alternate = GPIO_AF1_TIM2;
 	HAL_GPIO_Init(GPIOA, &g);
+
+	/* ---- Delta echo: a second, OPEN-DRAIN copy of CH1 on PA5 ----------------
+	 *
+	 * For measuring the camera<->IMU offset the TX2 needs to timestamp the real
+	 * trigger edge (WIRING.md section 4.4).  The Tegra pad it goes to is 1.8 V
+	 * UNBUFFERED, and this board's outputs are 3.3 V, so a push-pull tap would
+	 * destroy the pad.  Open-drain removes the problem instead of dividing it
+	 * down: the pin can only ever pull the line LOW, and the high level comes
+	 * from the Tegra's internal pull-up at 1.8 V.  Nothing on that wire is ever
+	 * driven above 1.8 V, so no external components are needed.
+	 *
+	 * PA5 is TIM2_CH1's alternate pin, so this is the SAME compare event that
+	 * drives PA0 - a hardware copy with no interrupt and no jitter, not a
+	 * software toggle.  It also follows the `pol` setting automatically, since
+	 * polarity lives in the channel, not the pad.
+	 *
+	 * ⚠ Timestamp the FALLING edge.  That is the one this pin drives hard; the
+	 * rising edge is limited by a weak internal pull-up charging the wire, so it
+	 * is slow and its timing is not trustworthy.  Under `pol 0` (active_low, the
+	 * working polarity on this rig) the falling edge is also the start of the
+	 * exposure, which is what you want to measure anyway.
+	 *
+	 * Costs one pin.  Harmless if nothing is connected.
+	 */
+	g.Pin       = GPIO_PIN_5;
+	g.Mode      = GPIO_MODE_AF_OD;
+	g.Pull      = GPIO_NOPULL;      /* the pull-up is the Tegra's, at 1.8 V */
+	g.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+	g.Alternate = GPIO_AF1_TIM2;
+	HAL_GPIO_Init(GPIOA, &g);
 }
 
 /* USART1 -> PA9 (TX) / PA10 (RX), AF7 — the same pins as the H7 build, so the

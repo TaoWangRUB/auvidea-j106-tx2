@@ -494,6 +494,31 @@ If there is genuinely nothing to hand, in preference order:
 
 1. **Route B (below).** Zero hardware, and you need the solver for extrinsics anyway. Realistically
    ~0.1–1 ms on Δ against the echo's ~1 µs — but see the note there on whether that matters.
+> ### ✅ BUILT AND VERIFIED 2026-09-01 — the open-drain variant (option 2 below)
+>
+> Route A is implemented, and it needed **no resistors and no divider**. The F401 drives a second,
+> open-drain copy of `TIM2_CH1` on **`PA5`** (`GPIO_MODE_AF_OD`, `stm32f4xx_hal_msp.c`) into
+> `gpio-389`; the 1.8 V high comes from a Tegra internal pull-up added to `gpio_pq5_pi5` in the
+> DTB (`nvidia,pull = <2>`, booted as `LABEL j106echo` on the J106). Because the pin only ever
+> pulls DOWN, nothing on that wire is ever driven above 1.8 V.
+>
+> Verified in this order, before anything was soldered: `gpio-389` read a stable **0** on the old
+> DTB and **1** on the new (pull-up live), then the physical pin was found by toggling the GPIO and
+> probing — worth doing, because this manual labels **two different tables "(J21)"** and its M110
+> section is still "to be added". Once wired, the line idles high and drops for exactly the
+> exposure.
+>
+> `scripts/trig-echo-stamp.py` timestamps the falling edge (the one the pin drives hard);
+> `scripts/trig-echo-delta.py` compares it with the capture node's frame log:
+>
+>     e = t_sof - t_edge - exposure          # 0 if SOF marks the end of exposure
+>     5 ms -> +0.3112 ms | 10 ms -> +0.3097 | 20 ms -> +0.3109
+>
+> **A constant +0.31 ms, varying 1.5 us across a 4x exposure change.** So SOF sits a fixed 0.31 ms
+> after end-of-exposure and the camera contributes only `w - e` = -0.26 ms to Delta. The rest is on
+> the IMU side: Delta measured +3.73 ms, and widening the gyro DLPF 184 -> 41 Hz (adding 3.00 ms of
+> group delay) moved it +2.79 ms, identifying the filter delay as the mechanism.
+
 2. **Open-drain drive + the Tegra's internal pull-up.** `GPIO_PQ5_PI5` (pin 69) is
    `(MUX UNCLAIMED) (GPIO UNCLAIMED)`, and Tegra186 pads support an internal pull-up
    (`nvidia,pull = <2>`). Configure `PA0`'s echo tap as **open-drain** on the STM32 and let the
