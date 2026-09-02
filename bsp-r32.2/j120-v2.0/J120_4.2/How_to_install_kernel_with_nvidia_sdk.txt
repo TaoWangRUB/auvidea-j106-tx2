@@ -1,0 +1,22 @@
+How to install the auvidea kernel the nvidia sdkmanager
+####################################################################
+This guid is writen for the J120 and the TX2 
+
+
+1. prepare the sdk
+ONLY NEEDED IF THE IF NO TX2 WAS FLASHED BEFORE
+-start the sdkmanager
+-select the Jetson TX2(P3310) as target Hardware
+-start the installation until the sdk asks you for either use automatic or manual setup
+ -> at this point you can choose to "skip" the rest of the installation and contine with step 2 of this instructions
+
+2. copy the contents of the auvidea packet to the nvida_sdk folder
+-> cp -r ~/J120_kernel/* /home/user/nvidia/nvidia_sdk/Jetpack_4.2_Linux_P3310/Linux_for_Tegra/
+
+3. switch into the Linux_for_Tegra folder
+-> /home/user/nvidia/nvidia_sdk/Jetpack_4.2_Linux_P3310/Linux_for_Tegra/
+
+4. apply the changes
+-> sudo ./apply_binaries.sh
+ 
+5. start the sdkmanger and follow the normal installation process
