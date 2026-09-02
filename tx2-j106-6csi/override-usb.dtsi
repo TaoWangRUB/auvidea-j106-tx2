@@ -53,3 +53,87 @@
  * host — no benefit — so it is NOT done. Recovery/flashing over J17 works regardless
  * (bootrom-driven RCM; verified: host sees 0955:7c18). See README §7 + tools/.
  */
+
+
+/* Carrier USB 3.0 routing — the J106 pairs the SuperSpeed lanes with the OTHER USB2 ports.
+ *
+ * Symptom: any USB3 device in either J106 connector enumerates high-speed (480 Mb/s) on
+ * bus 1 and never on bus 2; the 5000M root hub stays empty and dmesg only ever says
+ * "new high-speed USB device", never "new SuperSpeed".
+ *
+ * Cause: stock is wired for the devkit — usb3-0's companion is usb2-1 and usb3-1 is
+ * disabled. On the J106 the SS pairs land the other way round (tech ref §USB1 (J2) /
+ * §USB2 (J3)): lane usb3-0 goes to the connector whose USB 2.0 data pins are usb2-2 (J3,
+ * silkscreen "USB2", B42/B43 + USB3_TX2/RX2 on E41/E42/H41/H42), and usb3-1 to usb2-1
+ * (J2, silkscreen "USB1", A38/A39 + USB3_TX1/RX1 on C43/C44/F43/F44). With stock's
+ * mapping no port ever gets an SS partner, link training never runs, and BOTH connectors
+ * fall back to USB 2.0. Auvidea's own carrier DTB sets exactly this — see
+ * bsp-r32.2/c03-official-vs-auvidea.diff (auv-c03.dts is git-ignored; regenerate with dtc).
+ *
+ * Every change has to be applied TWICE. /plugin-manager/fragment-500-xusb-config matches
+ * this module SKU unconditionally (ids = ">=3310-1000-500", no odm-data gate) and rewrites
+ * the padctl ports and the xhci phy list at boot — dmesg: "node /plugin-manager/
+ * fragment-500-xusb-config match with board >=3310-1000-500...". Patching only the static
+ * nodes is silently undone.
+ *
+ * REQUIRES ODMDATA=0x3090000 (stock is 0x1090000). usb3-1 needs a second XUSB UPHY lane,
+ * and stock spends every lane but 0 on PCIe/SATA. Verified on the board: after
+ * `sudo ./flash.sh -o 0x3090000 -r -k BCT jetson-tx2 mmcblk0p1` from RCM,
+ * /chosen/plugin-manager/odm-data/ loses enable-pcie-on-uphy-lane1 and gains
+ * enable-xusb-on-uphy-lane1. That flash touches only the BCT — rootfs, kernel and DTB
+ * partitions are untouched (flash.sh skips build_fsimg when -k is given) and the board
+ * cold-booted first time. Nothing on this stack uses PCIe: the M90/M100/M110 manual lists
+ * "PCIe (4x)" as absent on all three motherboards, /sys/bus/pci/devices is empty, WiFi is
+ * SDIO (bcmsdh_sdmmc) and Ethernet is the integrated eqos — so the lane costs nothing.
+ * SATA keeps lane 5 either way (see README: the M110 SATA M.2 slot is the better storage
+ * path at ~270 MB/s vs USB2's ~35).
+ *
+ * STATUS — config verified, link NOT yet achieved. With all of the above live
+ * (usb3-0 okay/companion 2, usb3-1 okay/companion 1, xhci bound to both SS phys, lane 1
+ * assigned to XUSB, zero padctl errors) both connectors still negotiate 480 Mb/s with a
+ * drive AND with a known-USB3 self-powered hub, and bus 2 has never held a device. The
+ * same hub presents its USB3 function (2109:0817) on a PC and only its USB2 function
+ * (2109:2817) here, so the remaining suspect is the CABLE: J2/J3 are micro-USB3 10-pin
+ * sockets (Amphenol GSB343K33HR) and a plain micro-B plug mates only with the USB2 half,
+ * giving exactly this with no errors logged. The tech ref calls for a DeLOCK 83469 or
+ * equivalent. Re-test with a true 10-pin micro-USB3 cable before spending more effort here.
+ *
+ * The usb3-std-A-port* pinmux entries under pinctrl@3520000 are deliberately left alone:
+ * that node has no driver bound on this image (3520000.pinctrl has no `driver` symlink);
+ * the live padctl is 3520000.xusb_padctl (nvidia,tegra18x-xusb-padctl).
+ */
+&{/xusb_padctl@3520000/ports/usb3-0} {
+	nvidia,usb2-companion = <0x02>;
+};
+
+&{/xusb_padctl@3520000/ports/usb3-1} {
+	status = "okay";
+	nvidia,usb2-companion = <0x01>;
+};
+
+&{/xhci@3530000} {
+	phys = <&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-0}
+		&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-1}
+		&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-2}
+		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-0}
+		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-1}>;
+	phy-names = "usb2-0", "usb2-1", "usb2-2", "usb3-0", "usb3-1";
+};
+
+&{/plugin-manager/fragment-500-xusb-config/override@0/_overlay_} {
+	phys = <&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-0}
+		&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-1}
+		&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-2}
+		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-0}
+		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-1}>;
+	phy-names = "usb2-0", "usb2-1", "usb2-2", "usb3-0", "usb3-1";
+};
+
+&{/plugin-manager/fragment-500-xusb-config/override@1/_overlay_/ports/usb3-0} {
+	nvidia,usb2-companion = <0x02>;
+};
+
+&{/plugin-manager/fragment-500-xusb-config/override@1/_overlay_/ports/usb3-1} {
+	status = "okay";
+	nvidia,usb2-companion = <0x01>;
+};

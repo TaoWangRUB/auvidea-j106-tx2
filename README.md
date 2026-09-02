@@ -1399,6 +1399,63 @@ The historical pre-wiring notes follow.
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open / hardware‑limited
+- **USB 3.0 on J2/J3 (2026‑09‑02)** — **device tree + ODMDATA solved and verified; the link still
+  will not train. Remaining suspect: the cable.** Stock is wired for the devkit, so *both* J106
+  connectors are USB‑2‑only: `usb3-0`'s companion is `usb2-1` and `usb3-1` is disabled, whereas the
+  J106 routes lane `usb3-0` to **J3** (`usb2-2`) and `usb3-1` to **J2** (`usb2-1`) — see
+  [tech ref §USB1 (J2) / §USB2 (J3)](J106_technical_reference_1.0.pdf) and Auvidea's own carrier DTB, diffed in
+  [`bsp-r32.2/c03-official-vs-auvidea.diff`](bsp-r32.2/c03-official-vs-auvidea.diff). Fixed in
+  [`override-usb.dtsi`](tx2-j106-6csi/override-usb.dtsi), applied **twice** (static padctl node **and**
+  `/plugin-manager/fragment-500-xusb-config`, which rewrites the ports unconditionally for this SKU).
+  `usb3-1` additionally needs a second XUSB UPHY lane → **`ODMDATA=0x3090000`** (stock `0x1090000`):
+
+  ```
+  sudo ./flash.sh -o 0x3090000 -r -k BCT jetson-tx2 mmcblk0p1     # from RCM
+  ```
+
+  BCT‑only: `flash.sh` skips `build_fsimg` when `-k` is given, so rootfs/kernel/DTB partitions are
+  untouched — verified, board cold‑booted first time. Confirmed effect: `/chosen/plugin-manager/
+  odm-data/` loses `enable-pcie-on-uphy-lane1`, gains `enable-xusb-on-uphy-lane1`. Costs nothing —
+  the M90/M100/M110 manual lists **PCIe (4x) as absent on all three motherboards**,
+  `/sys/bus/pci/devices` is empty, WiFi is SDIO (`bcmsdh_sdmmc`), Ethernet is integrated `eqos`.
+  SATA keeps lane 5.
+
+  | checked | result |
+  |---|---|
+  | `usb3-0` okay / companion 2, `usb3-1` okay / companion 1 | ✅ live |
+  | xhci bound to both SS phys | ✅ `usb2-0 usb2-1 usb2-2 usb3-0 usb3-1` |
+  | `enable-xusb-on-uphy-lane1` | ✅ after BCT flash |
+  | padctl probe errors | none |
+  | J3 and J2, drive **and** self‑powered USB3 hub | ❌ both 480 Mb/s |
+  | bus 2 (5000M root hub) | ❌ empty on every boot |
+
+  The same Anker hub shows its USB3 function (`2109:0817`) on a PC and only its USB2 function
+  (`2109:2817`) here — and a hub is not power‑limited, which rules power out for the *speed* fault.
+  J2/J3 are **micro‑USB3 10‑pin sockets** (Amphenol GSB343K33HR); a plain micro‑B plug mates with the
+  USB2 half only and yields exactly this, silently. **Re‑test with a true 10‑pin micro‑USB3 cable
+  (tech ref names DeLOCK 83469) before spending more effort here.**
+
+- **USB bus power is 900 mA shared across J2+J3** (`USB1_EN_OC`, tech ref) — an NVMe enclosure
+  (Corsair MP510 + RTL9210) browns out on it: enumerates, then `Read Capacity(10) failed`
+  (Sense Key 0x5 / ASC 0x24), `/dev/sda` = 0 bytes, self‑disconnects after 30–200 s. A **self‑powered
+  hub** fixes it completely (full 1.9 TB reads, stable); a low‑power 256 GB SATA M.2 in the same
+  enclosure works direct. Not a config bug — budget for external power or pick a low‑draw drive.
+
+- **Storage: prefer the M110 SATA M.2 slot (J4) over USB.** SATA is on UPHY lane 5, untouched by the
+  ODMDATA change, and probes clean today — the enable GPIO is on the module's own `spmic@3c`
+  (`maxim,max77620`), **not** the absent carrier expander, so none of the `-517` grief that hit
+  USB/fan/HDMI applies:
+
+  ```
+  tegra-ahci 3507000.ahci-sata: AHCI 0001.0301 32 slots 2 ports 3 Gbps
+  ata1: SATA link down (SStatus 0 SControl 300)      # configured, waiting for a drive
+  vdd-pex-1v00 / dvdd-pex: enabled
+  ```
+
+  Fit an **M.2 2242, B‑key, SATA** card (*not* NVMe; M3 flat‑head screw). ~270 MB/s at SATA II vs
+  ~35 MB/s on the USB2 path — enough for 4× IMX296 mono8 1456×1088 @ 30 fps (~190 MB/s), which USB
+  cannot do at any of the rates measured here.
+
 - ~~**IMX296 ISP colour tuning**~~ — **SOLVED 2026‑08‑25.** A public IMX296 tuning exists after all,
   inside INNO‑MAKER's Jetson Orin binary package
   (`github.com/INNO-MAKER/cam-imx296raw-trigger`, `1-1jetson_orin_nano_driver/5.15.148/…tar.gz`,
