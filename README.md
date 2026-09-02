@@ -1399,8 +1399,9 @@ The historical pre-wiring notes follow.
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open / hardware‑limited
-- **USB 3.0 on J2/J3 (2026‑09‑02)** — **SoC side proven correct and healthy; the SS link still
-  does not train. Fault is physical, below the SoC.** Stock is wired for the devkit, so *both*
+- **USB 3.0 on J2/J3 (2026‑09‑02)** — **Every software configuration is exhausted, including
+  Auvidea's exact shipping config. The SS link does not train. The fault is physical, below the
+  SoC.** Stock is wired for the devkit, so *both*
   J106 connectors are USB‑2‑only: on the J106 the SS lanes pair with the *other* USB2 ports —
   `usb3-0`↔`usb2-2` (**J3**, silkscreen "USB2") and `usb3-1`↔`usb2-1` (**J2**, silkscreen "USB1")
   — whereas stock points `usb3-0` at `usb2-1` and disables `usb3-1`. Fixed in
@@ -1450,6 +1451,21 @@ The historical pre-wiring notes follow.
 
   `RxDetect` + `CCS=0` with a device attached = **no far‑end receiver termination sensed**. Training
   never starts, so this is not a signal‑integrity or link‑training problem.
+
+  **The decisive test.** With **stock `ODMDATA=0x1090000` + this DTB** — i.e. byte‑for‑byte what
+  Auvidea ships for the J10x — the drive on J3 still enumerates at **480 Mb/s**. The revert
+  demonstrably took effect in hardware: xHCI SS port 3 flips from `RxDetect` to `Disabled`
+  (one XUSB lane instead of two), and `/chosen/plugin-manager/odm-data/` shows
+  `enable-pcie-on-uphy-lane1` restored with `enable-xusb-on-uphy-lane1` gone. Full matrix, all
+  with both J2 and J3, a drive **and** a self‑powered USB3 hub:
+
+  | config | result |
+  |---|---|
+  | stock DTB + stock ODMDATA | 480 |
+  | Auvidea DTB + `0x3090000` | 480 |
+  | Auvidea DTB + `oc-pin` + `0x3090000` | 480 |
+  | + PCIe controller disabled | 480 |
+  | **Auvidea DTB + stock `0x1090000`** (their exact config) | **480** |
 
   **Ruled out by test, not by reasoning:** DT config and companion mapping; the padctl driver;
   power (a self‑powered USB3 hub that shows its `2109:0817` USB3 function on a PC shows only
