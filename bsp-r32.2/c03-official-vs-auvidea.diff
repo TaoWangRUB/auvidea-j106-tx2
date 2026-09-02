@@ -1,0 +1,310 @@
+--- off-c03.dts	2026-06-13 22:26:46.503050401 +0200
++++ auv-c03.dts	2026-06-13 22:26:46.485740976 +0200
+@@ -7,12 +7,12 @@
+ 	#address-cells = <0x02>;
+ 	#size-cells = <0x02>;
+ 	model = "quill";
+-	nvidia,dtsfilename = "/dvs/git/dirty/git-master_linux/kernel/kernel-4.9/arch/arm64/boot/dts/../../../../../../hardware/nvidia/platform/t18x/quill/kernel-dts/tegra186-quill-p3310-1000-c03-00-base.dts";
++	nvidia,dtsfilename = "/home/auvidea/Downloads/l4t_rev_32_2_1/TX2/public_sources/kernel_src/kernel/kernel-4.9/arch/arm64/boot/dts/../../../../../../hardware/nvidia/platform/t18x/quill/kernel-dts/tegra186-quill-p3310-1000-c03-00-base.dts";
+ 	nvidia,boardids = "3310:0000:A0";
+ 	nvidia,proc-boardid = "3310:0000:A0";
+ 	nvidia,fastboot-usb-vid = <0x955>;
+ 	nvidia,fastboot-usb-pid = <0xee16>;
+-	nvidia,dtbbuildtime = "Aug 12 2019\021:34:58";
++	nvidia,dtbbuildtime = "Nov 21 2019\016:22:50";
+ 
+ 	cpus {
+ 		#address-cells = <0x02>;
+@@ -9171,8 +9171,8 @@
+ 		phys = <0xa6>;
+ 		phy-names = "otg-phy";
+ 		nvidia,xusb-padctl = <0xa7>;
+-		linux,phandle = <0xb4>;
+-		phandle = <0xb4>;
++		linux,phandle = <0xb3>;
++		phandle = <0xb3>;
+ 	};
+ 
+ 	mailbox@3538000 {
+@@ -9181,8 +9181,8 @@
+ 		interrupts = <0x00 0xa4 0x04>;
+ 		#mbox-cells = <0x00>;
+ 		status = "okay";
+-		linux,phandle = <0xb5>;
+-		phandle = <0xb5>;
++		linux,phandle = <0xb4>;
++		phandle = <0xb4>;
+ 	};
+ 
+ 	xotg {
+@@ -9196,8 +9196,8 @@
+ 		#extcon-cells = <0x01>;
+ 		phys = <0xa9 0x10>;
+ 		phy-names = "otg-usb2";
+-		linux,phandle = <0xb3>;
+-		phandle = <0xb3>;
++		linux,phandle = <0xb2>;
++		phandle = <0xb2>;
+ 	};
+ 
+ 	xusb_padctl@3520000 {
+@@ -9301,7 +9301,7 @@
+ 
+ 			usb2-0 {
+ 				status = "okay";
+-				mode = "otg";
++				mode = "host";
+ 				vbus-supply = <0xb0>;
+ 				nvidia,oc-pin = <0x00>;
+ 			};
+@@ -9316,11 +9316,11 @@
+ 			usb2-2 {
+ 				status = "okay";
+ 				mode = "host";
+-				vbus-supply = <0xb2>;
++				vbus-supply = <0x26>;
+ 			};
+ 
+ 			usb3-0 {
+-				status = "disabled";
++				status = "okay";
+ 				nvidia,usb2-companion = <0x02>;
+ 			};
+ 
+@@ -9370,7 +9370,7 @@
+ 		iommus = <0x11 0x1b>;
+ 		iommu_sodev_map;
+ 		status = "okay";
+-		otg-controller = <0xb3>;
++		otg-controller = <0xb2>;
+ 		interrupts = <0x00 0xa3 0x04 0x00 0xa4 0x04 0x00 0xa7 0x04>;
+ 		clocks = <0x10 0x71 0x10 0xf4 0x10 0x72 0x10 0xf2 0x10 0x261 0x10 0xf5 0x10 0x215 0x10 0x261 0x10 0x200>;
+ 		clock-names = "xusb_host\0xusb_falcon_src\0xusb_ss\0xusb_ss_src\0xusb_hs_src\0xusb_fs_src\0pll_u_480m\0clk_m\0pll_e";
+@@ -9381,8 +9381,8 @@
+ 		avddio_usb-supply = <0x13>;
+ 		avdd_pll_utmip-supply = <0x12>;
+ 		hvdd_usb-supply = <0x12>;
+-		phys = <0xa9 0x10 0xa9 0x11 0xa9 0x00>;
+-		phy-names = "utmi-0\0utmi-1\0usb3-0";
++		phys = <0xa9 0x10 0xa9 0x11 0xa9 0x12 0xa9 0x00 0xa9 0x01>;
++		phy-names = "utmi-0\0utmi-1\0utmi-2\0usb3-0\0usb3-1";
+ 		linux,phandle = <0x10b>;
+ 		phandle = <0x10b>;
+ 	};
+@@ -9394,8 +9394,8 @@
+ 		iommus = <0x11 0x1c>;
+ 		iommu_sodev_map;
+ 		status = "okay";
+-		charger-detector = <0xb4>;
+-		otg-controller = <0xb3>;
++		charger-detector = <0xb3>;
++		otg-controller = <0xb2>;
+ 		clocks = <0x10 0xf3 0x10 0x72 0x10 0xf2 0x10 0xf5>;
+ 		nvidia,xusb-padctl = <0xa7>;
+ 		extcon-cables = <0xa8 0x00>;
+@@ -9418,13 +9418,13 @@
+ 		clocks = <0x10 0x6f 0x10 0x215 0x10 0x87 0x10 0x86>;
+ 		clock-names = "xusb_clk\0utmipll\0usb2_trk\0hsic_trk";
+ 		interrupts = <0x00 0xa7 0x04>;
+-		mboxes = <0xb5>;
++		mboxes = <0xb4>;
+ 		mbox-names = "xusb";
+ 		#phy-cells = <0x01>;
+ 		status = "okay";
+ 		vbus-0-supply = <0xb0>;
+ 		vbus-1-supply = <0xb1>;
+-		vbus-2-supply = <0xb2>;
++		vbus-2-supply = <0xb5>;
+ 		vbus-3-supply = <0x26>;
+ 		vddio-hsic-supply = <0x26>;
+ 		avdd_usb-supply = <0x13>;
+@@ -9446,6 +9446,7 @@
+ 			phandle = <0xb6>;
+ 
+ 			usb2-micro-AB {
++				status = "okay";
+ 				nvidia,lanes = "otg-0";
+ 				nvidia,function = "xusb";
+ 				nvidia,port-cap = <0x03>;
+@@ -9453,29 +9454,33 @@
+ 			};
+ 
+ 			usb2-std-A-port2 {
++				status = "okay";
+ 				nvidia,lanes = "otg-1";
+ 				nvidia,function = "xusb";
+ 				nvidia,port-cap = <0x01>;
+ 				nvidia,oc-pin = <0x01>;
+ 			};
+ 
+-			usb3-std-A-port2 {
+-				nvidia,lanes = "usb3-0";
++			usb2-std-A-port3 {
++				status = "okay";
++				nvidia,lanes = "otg-2";
++				nvidia,function = "xusb";
+ 				nvidia,port-cap = <0x01>;
+ 				nvidia,oc-pin = <0x01>;
+ 			};
+ 
+-			e3325-usb3-std-A-HS {
+-				nvidia,lanes = "otg-2";
+-				nvidia,function = "xusb";
++			usb3-std-A-port1 {
++				status = "okay";
++				nvidia,lanes = "usb3-0";
+ 				nvidia,port-cap = <0x01>;
+-				status = "disabled";
++				nvidia,oc-pin = <0x01>;
+ 			};
+ 
+-			e3325-usb3-std-A-SS {
+-				nvidia,lanes = "usb3-0";
++			usb3-std-A-port2 {
++				status = "okay";
++				nvidia,lanes = "usb3-1";
+ 				nvidia,port-cap = <0x01>;
+-				status = "disabled";
++				nvidia,oc-pin = <0x01>;
+ 			};
+ 		};
+ 	};
+@@ -9937,7 +9942,7 @@
+ 			#address-cells = <0x03>;
+ 			#size-cells = <0x02>;
+ 			ranges;
+-			nvidia,num-lanes = <0x04>;
++			nvidia,num-lanes = <0x02>;
+ 			nvidia,afi-ctl-offset = <0x110>;
+ 			nvidia,disable-aspm-states = <0x0f>;
+ 			nvidia,disable-clock-request;
+@@ -11269,8 +11274,8 @@
+ 			regulator-min-microvolt = <0x4c4b40>;
+ 			regulator-max-microvolt = <0x4c4b40>;
+ 			gpio = <0xed 0x00 0x00>;
+-			linux,phandle = <0xb2>;
+-			phandle = <0xb2>;
++			linux,phandle = <0xb5>;
++			phandle = <0xb5>;
+ 		};
+ 
+ 		regulator@18 {
+@@ -11994,7 +11999,7 @@
+ 			odm-data = "mods-build";
+ 
+ 			override@0 {
+-				target = <0xb5>;
++				target = <0xb4>;
+ 
+ 				_overlay_ {
+ 					status = "disabled";
+@@ -12360,6 +12365,10 @@
+ 
+ 					ports {
+ 
++						usb2-2 {
++							status = "okay";
++						};
++
+ 						usb3-0 {
+ 							status = "okay";
+ 						};
+@@ -12371,6 +12380,7 @@
+ 				target = <0x10b>;
+ 
+ 				_overlay_ {
++					status = "okay";
+ 					phys = <0xa6 0x10c 0x10d 0x10e 0x10f>;
+ 					phy-names = "usb2-0\0usb2-1\0usb2-2\0usb3-0\0usb3-1";
+ 				};
+@@ -12381,11 +12391,11 @@
+ 
+ 				_overlay_ {
+ 
+-					e3325_sdio_rst {
++					usb3-std-A-port1 {
+ 						status = "okay";
+ 					};
+ 
+-					e3325_lane0_mux {
++					usb3-std-A-port2 {
+ 						status = "okay";
+ 					};
+ 				};
+@@ -12397,11 +12407,11 @@
+ 				_overlay_ {
+ 
+ 					pci@1,0 {
+-						nvidia,num-lanes = <0x02>;
++						nvidia,num-lanes = <0x01>;
+ 					};
+ 
+ 					pci@2,0 {
+-						nvidia,num-lanes = <0x01>;
++						nvidia,num-lanes = <0x00>;
+ 					};
+ 
+ 					pci@3,0 {
+@@ -12420,7 +12430,7 @@
+ 				_overlay_ {
+ 
+ 					pci@1,0 {
+-						nvidia,num-lanes = <0x04>;
++						nvidia,num-lanes = <0x01>;
+ 					};
+ 
+ 					pci@2,0 {
+@@ -12484,8 +12494,8 @@
+ 				target = <0x10b>;
+ 
+ 				_overlay_ {
+-					phys = <0xa6 0x10c 0x10d 0x10e>;
+-					phy-names = "usb2-0\0usb2-1\0usb2-2\0usb3-0";
++					phys = <0xa6 0x10c 0x10d 0x10e 0x10f>;
++					phy-names = "usb2-0\0usb2-1\0usb2-2\0usb3-0\0usb3-1";
+ 				};
+ 			};
+ 
+@@ -12496,11 +12506,12 @@
+ 
+ 					ports {
+ 
+-						usb3-1 {
+-							status = "disabled";
++						usb3-0 {
++							nvidia,usb2-companion = <0x02>;
++							status = "okay";
+ 						};
+ 
+-						usb3-0 {
++						usb3-1 {
+ 							nvidia,usb2-companion = <0x01>;
+ 							status = "okay";
+ 						};
+@@ -12518,21 +12529,18 @@
+ 				target = <0x10b>;
+ 
+ 				_overlay_ {
+-					phys = <0xa6 0x10c 0x10d>;
+-					phy-names = "usb2-0\0usb2-1\0usb2-2";
++					phys = <0xa6 0x10c 0x10d 0x10e 0x10f>;
++					phy-names = "usb2-0\0usb2-1\0usb2-2\0usb3-0\0usb3-1";
+ 				};
+ 			};
+ 
+ 			override@1 {
+-				target = <0xa7>;
++				target = <0xb6>;
+ 
+ 				_overlay_ {
+ 
+-					ports {
+-
+-						usb3-0 {
+-							status = "disabled";
+-						};
++					usb3-std-A-port2 {
++						status = "okay";
+ 					};
+ 				};
+ 			};
