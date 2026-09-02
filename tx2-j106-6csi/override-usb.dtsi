@@ -55,53 +55,66 @@
  */
 
 
-/* Carrier USB 3.0 routing — the J106 pairs the SuperSpeed lanes with the OTHER USB2 ports.
+
+/* Carrier USB 3.0 routing — matched to Auvidea's shipped J10x/J120 DTB.
  *
  * Symptom: any USB3 device in either J106 connector enumerates high-speed (480 Mb/s) on
- * bus 1 and never on bus 2; the 5000M root hub stays empty and dmesg only ever says
- * "new high-speed USB device", never "new SuperSpeed".
+ * bus 1 and never on bus 2; the 5000M root hub stays empty.
  *
- * Cause: stock is wired for the devkit — usb3-0's companion is usb2-1 and usb3-1 is
- * disabled. On the J106 the SS pairs land the other way round (tech ref §USB1 (J2) /
- * §USB2 (J3)): lane usb3-0 goes to the connector whose USB 2.0 data pins are usb2-2 (J3,
- * silkscreen "USB2", B42/B43 + USB3_TX2/RX2 on E41/E42/H41/H42), and usb3-1 to usb2-1
- * (J2, silkscreen "USB1", A38/A39 + USB3_TX1/RX1 on C43/C44/F43/F44). With stock's
- * mapping no port ever gets an SS partner, link training never runs, and BOTH connectors
- * fall back to USB 2.0. Auvidea's own carrier DTB sets exactly this — see
- * bsp-r32.2/c03-official-vs-auvidea.diff (auv-c03.dts is git-ignored; regenerate with dtc).
+ * Cause: stock is wired for the devkit. On the J106 the SS lanes pair with the OTHER USB2
+ * ports — usb3-0 with usb2-2 (J3, silkscreen "USB2") and usb3-1 with usb2-1 (J2,
+ * silkscreen "USB1"). Under stock, usb3-0 points at usb2-1 and usb3-1 is disabled, so J2
+ * gets the wrong SS port and J3 gets none — both connectors fall back to USB 2.0.
  *
- * Every change has to be applied TWICE. /plugin-manager/fragment-500-xusb-config matches
- * this module SKU unconditionally (ids = ">=3310-1000-500", no odm-data gate) and rewrites
- * the padctl ports and the xhci phy list at boot — dmesg: "node /plugin-manager/
- * fragment-500-xusb-config match with board >=3310-1000-500...". Patching only the static
- * nodes is silently undone.
+ * Confirmed twice, independently:
+ *   - Auvidea's shipped c03 DTB (bsp-r32.2/j120-v2.0, J120_4.2.zip). A subtree diff against
+ *     stock shows EXACTLY three padctl changes, all reproduced below:
+ *         usb2-2: + nvidia,oc-pin = <1>
+ *         usb3-0: companion 1 -> 2
+ *         usb3-1: disabled -> okay
+ *     plus xhci carrying both SS phys.
+ *   - Their own J120_rev9_second_USB.txt encodes the same pairing in the legacy binding by
+ *     phy ORDER: "utmi-1, usb3-1" then "utmi-2, usb3-0".
  *
- * REQUIRES ODMDATA=0x3090000 (stock is 0x1090000). usb3-1 needs a second XUSB UPHY lane,
- * and stock spends every lane but 0 on PCIe/SATA. Verified on the board: after
- * `sudo ./flash.sh -o 0x3090000 -r -k BCT jetson-tx2 mmcblk0p1` from RCM,
- * /chosen/plugin-manager/odm-data/ loses enable-pcie-on-uphy-lane1 and gains
- * enable-xusb-on-uphy-lane1. That flash touches only the BCT — rootfs, kernel and DTB
- * partitions are untouched (flash.sh skips build_fsimg when -k is given) and the board
- * cold-booted first time. Nothing on this stack uses PCIe: the M90/M100/M110 manual lists
- * "PCIe (4x)" as absent on all three motherboards, /sys/bus/pci/devices is empty, WiFi is
- * SDIO (bcmsdh_sdmmc) and Ethernet is the integrated eqos — so the lane costs nothing.
- * SATA keeps lane 5 either way (see README: the M110 SATA M.2 slot is the better storage
- * path at ~270 MB/s vs USB2's ~35).
+ * Apply everything TWICE. /plugin-manager/fragment-500-xusb-config matches this module SKU
+ * unconditionally (ids = ">=3310-1000-500", no odm-data gate) and rewrites the padctl ports
+ * and xhci phy list at boot; a static-only patch is silently undone.
  *
- * STATUS — config verified, link NOT yet achieved. With all of the above live
- * (usb3-0 okay/companion 2, usb3-1 okay/companion 1, xhci bound to both SS phys, lane 1
- * assigned to XUSB, zero padctl errors) both connectors still negotiate 480 Mb/s with a
- * drive AND with a known-USB3 self-powered hub, and bus 2 has never held a device. The
- * same hub presents its USB3 function (2109:0817) on a PC and only its USB2 function
- * (2109:2817) here, so the remaining suspect is the CABLE: J2/J3 are micro-USB3 10-pin
- * sockets (Amphenol GSB343K33HR) and a plain micro-B plug mates only with the USB2 half,
- * giving exactly this with no errors logged. The tech ref calls for a DeLOCK 83469 or
- * equivalent. Re-test with a true 10-pin micro-USB3 cable before spending more effort here.
+ * ODMDATA: LEAVE IT AT STOCK 0x1090000.
+ * Auvidea's J120 4.2 release notes give the J10x family (which the J106 is) "1x USB 3.0,
+ * config 2 (default port muxing)"; config 6 is the 2x USB3 arrangement for J121/J142/J143.
+ * Their shipped p2771-0000.conf.common indeed carries ODMDATA=0x1090000 — i.e. stock. An
+ * earlier attempt here used 0x3090000 (taken from the v2.2 J90 BSP); that moves UPHY lane 1
+ * from PCIe to XUSB (verified: odm-data loses enable-pcie-on-uphy-lane1, gains
+ * enable-xusb-on-uphy-lane1) but is the WRONG carrier's muxing and did not help.
+ * To revert:  sudo ./flash.sh -o 0x1090000 -r -k BCT jetson-tx2 mmcblk0p1   (from RCM)
+ *
+ * STATUS — SoC side proven correct, link still not training. See README §7 for the full
+ * evidence. In short, with all of the above live:
+ *   - padctl dynamic debug shows both SS phys init and power on with the right companions
+ *     ("USB3 port 0 companion USB2 port 2 mode 1", "USB3 port 1 companion USB2 port 1"),
+ *     and zero errors anywhere in padctl/xhci/dmesg/journal/UART.
+ *   - xHCI PORTSC: all three SS ports PP=1, PLS=RxDetect, CCS=0 — powered and polling, but
+ *     no far-end receiver termination is ever detected, with a device plugged in.
+ *   - Disabling the PCIe controller (it holds 4+1 UPHY lanes from ~1.02 s to ~3.69 s before
+ *     "no end points detected") changed nothing — tested, not assumed.
+ * So the fault is physical, below the SoC. Leading suspect is the CABLE ROLE: J2/J3 are
+ * micro-USB3 sockets used as HOST ports, and a normal micro-B cable is wired for the
+ * peripheral end, which puts TX against TX on the SS pairs while USB2 (no role crossover)
+ * keeps working. The tech ref calls for a DeLOCK 83469 micro-B -> A-female OTG adapter.
+ * Try that before spending more time here.
+ *
+ * For bulk logging prefer the M110 SATA M.2 slot (J4) instead — lane 5, untouched by any of
+ * this, probes clean today, ~270 MB/s vs the USB2 path's ~35. See README.
  *
  * The usb3-std-A-port* pinmux entries under pinctrl@3520000 are deliberately left alone:
  * that node has no driver bound on this image (3520000.pinctrl has no `driver` symlink);
  * the live padctl is 3520000.xusb_padctl (nvidia,tegra18x-xusb-padctl).
  */
+&{/xusb_padctl@3520000/ports/usb2-2} {
+	nvidia,oc-pin = <0x01>;
+};
+
 &{/xusb_padctl@3520000/ports/usb3-0} {
 	nvidia,usb2-companion = <0x02>;
 };
