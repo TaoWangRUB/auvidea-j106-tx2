@@ -89,8 +89,11 @@
  * enable-xusb-on-uphy-lane1) but is the WRONG carrier's muxing and did not help.
  * To revert:  sudo ./flash.sh -o 0x1090000 -r -k BCT jetson-tx2 mmcblk0p1   (from RCM)
  *
- * STATUS — SoC side proven correct, link still not training. See README §7 for the full
- * evidence. In short, with all of the above live:
+ * STATUS — every software configuration is exhausted, INCLUDING Auvidea's exact shipping
+ * config (stock ODMDATA 0x1090000 + this DTB), tested 2026-09-02: still 480 Mb/s on both
+ * J2 and J3. The ODMDATA revert demonstrably took effect in hardware — xHCI SS port 3 flips
+ * from RxDetect to Disabled, i.e. one XUSB lane instead of two. So the fault is PHYSICAL,
+ * below the SoC. See README §7 for the full evidence. In short, with all of the above live:
  *   - padctl dynamic debug shows both SS phys init and power on with the right companions
  *     ("USB3 port 0 companion USB2 port 2 mode 1", "USB3 port 1 companion USB2 port 1"),
  *     and zero errors anywhere in padctl/xhci/dmesg/journal/UART.
