@@ -1399,41 +1399,71 @@ The historical pre-wiring notes follow.
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open / hardware‑limited
-- **USB 3.0 on J2/J3 (2026‑09‑02)** — **device tree + ODMDATA solved and verified; the link still
-  will not train. Remaining suspect: the cable.** Stock is wired for the devkit, so *both* J106
-  connectors are USB‑2‑only: `usb3-0`'s companion is `usb2-1` and `usb3-1` is disabled, whereas the
-  J106 routes lane `usb3-0` to **J3** (`usb2-2`) and `usb3-1` to **J2** (`usb2-1`) — see
-  [tech ref §USB1 (J2) / §USB2 (J3)](J106_technical_reference_1.0.pdf) and Auvidea's own carrier DTB, diffed in
-  [`bsp-r32.2/c03-official-vs-auvidea.diff`](bsp-r32.2/c03-official-vs-auvidea.diff). Fixed in
-  [`override-usb.dtsi`](tx2-j106-6csi/override-usb.dtsi), applied **twice** (static padctl node **and**
-  `/plugin-manager/fragment-500-xusb-config`, which rewrites the ports unconditionally for this SKU).
-  `usb3-1` additionally needs a second XUSB UPHY lane → **`ODMDATA=0x3090000`** (stock `0x1090000`):
+- **USB 3.0 on J2/J3 (2026‑09‑02)** — **SoC side proven correct and healthy; the SS link still
+  does not train. Fault is physical, below the SoC.** Stock is wired for the devkit, so *both*
+  J106 connectors are USB‑2‑only: on the J106 the SS lanes pair with the *other* USB2 ports —
+  `usb3-0`↔`usb2-2` (**J3**, silkscreen "USB2") and `usb3-1`↔`usb2-1` (**J2**, silkscreen "USB1")
+  — whereas stock points `usb3-0` at `usb2-1` and disables `usb3-1`. Fixed in
+  [`override-usb.dtsi`](tx2-j106-6csi/override-usb.dtsi), applied **twice** (static padctl node
+  **and** `/plugin-manager/fragment-500-xusb-config`, which rewrites the ports unconditionally for
+  this SKU and silently undoes a static‑only patch).
+
+  Confirmed independently from Auvidea's own **J120 4.2** package
+  ([`bsp-r32.2/j120-v2.0/`](bsp-r32.2/j120-v2.0/)): a subtree diff of their shipped c03 DTB against
+  stock shows **exactly three** padctl changes, plus the 5‑phy xhci list —
 
   ```
-  sudo ./flash.sh -o 0x3090000 -r -k BCT jetson-tx2 mmcblk0p1     # from RCM
+  usb2-2:  + nvidia,oc-pin = <0x01>
+  usb3-0:    companion 1 → 2        (J3)
+  usb3-1:    disabled → okay        (J2)
   ```
 
-  BCT‑only: `flash.sh` skips `build_fsimg` when `-k` is given, so rootfs/kernel/DTB partitions are
-  untouched — verified, board cold‑booted first time. Confirmed effect: `/chosen/plugin-manager/
-  odm-data/` loses `enable-pcie-on-uphy-lane1`, gains `enable-xusb-on-uphy-lane1`. Costs nothing —
-  the M90/M100/M110 manual lists **PCIe (4x) as absent on all three motherboards**,
-  `/sys/bus/pci/devices` is empty, WiFi is SDIO (`bcmsdh_sdmmc`), Ethernet is integrated `eqos`.
-  SATA keeps lane 5.
+  and their `J120_rev9_second_USB.txt` encodes the same pairing in the legacy binding by phy
+  **order** (`utmi-1, usb3-1` then `utmi-2, usb3-0`).
 
-  | checked | result |
-  |---|---|
-  | `usb3-0` okay / companion 2, `usb3-1` okay / companion 1 | ✅ live |
-  | xhci bound to both SS phys | ✅ `usb2-0 usb2-1 usb2-2 usb3-0 usb3-1` |
-  | `enable-xusb-on-uphy-lane1` | ✅ after BCT flash |
-  | padctl probe errors | none |
-  | J3 and J2, drive **and** self‑powered USB3 hub | ❌ both 480 Mb/s |
-  | bus 2 (5000M root hub) | ❌ empty on every boot |
+  **ODMDATA: leave at stock `0x1090000`.** Auvidea's release notes give the **J10x family (our
+  J106)** *"1x USB 3.0, config 2 (default port muxing)"*; *config 6* is the 2× USB3 arrangement for
+  J121/J142/J143. Their shipped `p2771-0000.conf.common` carries `ODMDATA=0x1090000`, i.e. stock.
+  An earlier attempt here flashed `0x3090000` (from the v2.2 J90 BSP) — it does move UPHY lane 1
+  from PCIe to XUSB (verified: `odm-data` loses `enable-pcie-on-uphy-lane1`, gains
+  `enable-xusb-on-uphy-lane1`) but it is the **wrong carrier's muxing** and did not help. Revert with
+  `sudo ./flash.sh -o 0x1090000 -r -k BCT jetson-tx2 mmcblk0p1` from RCM (BCT‑only; `flash.sh` skips
+  `build_fsimg` when `-k` is given, so rootfs/kernel/DTB partitions are untouched — verified, board
+  cold‑booted first time).
 
-  The same Anker hub shows its USB3 function (`2109:0817`) on a PC and only its USB2 function
-  (`2109:2817`) here — and a hub is not power‑limited, which rules power out for the *speed* fault.
-  J2/J3 are **micro‑USB3 10‑pin sockets** (Amphenol GSB343K33HR); a plain micro‑B plug mates with the
-  USB2 half only and yields exactly this, silently. **Re‑test with a true 10‑pin micro‑USB3 cable
-  (tech ref names DeLOCK 83469) before spending more effort here.**
+  **Evidence that the SoC side is fine** (padctl dynamic debug, 180 callsites, xhci re‑bound):
+
+  ```
+  phy init USB3 0 ; USB3 port 0 companion USB2 port 2 mode 1 ; phy power on USB3 0
+  phy init USB3 1 ; USB3 port 1 companion USB2 port 1 mode 1 ; phy power on USB3 1
+  ```
+
+  Both SS phys initialise and power on with the configured companions, and there is **no** error,
+  warning, timeout or PLL failure anywhere in padctl / xhci / dmesg / journalctl / UART0.
+
+  **Evidence that nothing is on the far end** (xHCI PORTSC via `/dev/mem`, device plugged in):
+
+  | port | proto | PP | PLS | CCS |
+  |---|---|---|---|---|
+  | 1–3 | USB3.0 | 1 | `RxDetect` | 0 |
+  | 6 | USB2.0 | 1 | `U0` High | 1 |
+
+  `RxDetect` + `CCS=0` with a device attached = **no far‑end receiver termination sensed**. Training
+  never starts, so this is not a signal‑integrity or link‑training problem.
+
+  **Ruled out by test, not by reasoning:** DT config and companion mapping; the padctl driver;
+  power (a self‑powered USB3 hub that shows its `2109:0817` USB3 function on a PC shows only
+  `2109:2817` USB2 here); the drive; and **PCIe lane contention** — PCIe holds 4+1 UPHY lanes from
+  ~1.02 s until "no end points detected" at ~3.69 s, but a DTB with the PCIe controller fully
+  disabled changed nothing.
+
+  **Leading remaining suspect — cable role.** J2/J3 are micro‑USB3 **sockets used as host ports**.
+  A normal micro‑B cable is wired for the *peripheral* end, so using one inverted puts TX against TX
+  on the SS pairs while USB2 (no role crossover) keeps working perfectly — exactly the signature
+  measured. A cable verified at USB3 against a RealSense T265 does **not** verify this orientation.
+  The tech ref calls for a **DeLOCK 83469** micro‑B → A‑female **OTG** adapter; try that first.
+  If it and the ODMDATA revert both fail, conclude the carrier's SS traces don't work with a TX2.
+
 
 - **USB bus power is 900 mA shared across J2+J3** (`USB1_EN_OC`, tech ref) — an NVMe enclosure
   (Corsair MP510 + RTL9210) browns out on it: enumerates, then `Read Capacity(10) failed`
