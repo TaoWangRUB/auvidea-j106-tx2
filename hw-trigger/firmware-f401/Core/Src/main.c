@@ -5,6 +5,7 @@
  */
 #include "main.h"
 #include "camtrig.h"
+#include "ranger.h"
 #include "cmsis_os2.h"
 #include "usb_device.h"
 
@@ -13,6 +14,7 @@ UART_HandleTypeDef huart1;
 
 osThreadId_t g_trig_thread;
 osThreadId_t g_cli_thread;
+osThreadId_t g_rng_thread;
 
 static const osThreadAttr_t trig_attr = {
 	.name       = "trig",
@@ -28,6 +30,14 @@ static const osThreadAttr_t cli_attr = {
 	 * rather than a silent corruption. */
 	.stack_size = 1024 * 4,
 	.priority   = osPriorityNormal,
+};
+/* Below the CLI: an autonomous range acquisition must never delay a human's
+ * command, and must certainly never delay `trig`.  512 words is ample — the
+ * deepest call here is HAL_I2C_Master_Receive(). */
+static const osThreadAttr_t rng_attr = {
+	.name       = "rng",
+	.stack_size = 512 * 4,
+	.priority   = osPriorityBelowNormal,
 };
 
 static int g_on_hse;
@@ -313,6 +323,13 @@ int main(void)
 	camtrig_init();
 	cli_init();
 
+	/* After camtrig_init(), and deliberately so.  ranger_init() probes the
+	 * I2C bus, and a shorted or unterminated bus makes that probe spend its
+	 * full timeout; doing it second means the waveform is already running
+	 * before anything can go slowly wrong.  It cannot fail hard — a missing
+	 * or miswired ranger is reported by `status`, never fatal. */
+	ranger_init();
+
 	/* USB is deliberately NOT started here.  MX_USB_DEVICE_Init() enables
 	 * OTG_FS_IRQn, and that ISR posts to a FreeRTOS queue and calls
 	 * portYIELD_FROM_ISR — neither legal before the scheduler runs.
@@ -321,6 +338,11 @@ int main(void)
 	g_trig_thread = osThreadNew(camtrig_task, NULL, &trig_attr);
 	g_cli_thread  = osThreadNew(cli_task,     NULL, &cli_attr);
 	configASSERT(g_trig_thread != NULL && g_cli_thread != NULL);
+
+	/* The ranger is OPTIONAL.  If its thread cannot be created the trigger
+	 * and the console still come up — deliberately not in the configASSERT
+	 * above, because a missing ranger must never be able to stop the rig. */
+	g_rng_thread = osThreadNew(ranger_task, NULL, &rng_attr);
 
 	/* TIM2 update: pulse bookkeeping only, never pulse generation.
 	 * Priority 5 == configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY, the
