@@ -85,6 +85,61 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim)
 	HAL_GPIO_Init(GPIOA, &g);
 }
 
+/* I2C1 -> PB6 (SCL) / PB7 (SDA), AF4 — the Garmin LIDAR-Lite (ranger.c).
+ *
+ * Port B was untouched before this, so it collides with nothing: PA0-PA3 are
+ * TIM2, PA5 the delta echo, PA9/PA10 the console, PA11/PA12 USB, PC13 the LED.
+ *
+ * GPIO_PULLUP here is a safety net, NOT the design.  The F4's internal pull-ups
+ * are tens of kOhm, far too weak to pull a metre of cable up inside an I2C rise
+ * time; fit 4.7k externals to 3V3, as WIRING.md section 4.5 says.  The internal
+ * ones only stop the bus floating when nothing is plugged in, which would
+ * otherwise read as phantom errors on a board with no sensor attached. */
+void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
+{
+	GPIO_InitTypeDef g = {0};
+
+	if (hi2c->Instance != I2C1)
+		return;
+
+	__HAL_RCC_GPIOB_CLK_ENABLE();
+
+	g.Pin       = GPIO_PIN_6 | GPIO_PIN_7;
+	g.Mode      = GPIO_MODE_AF_OD;
+	g.Pull      = GPIO_PULLUP;
+	g.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+	g.Alternate = GPIO_AF4_I2C1;
+	HAL_GPIO_Init(GPIOB, &g);
+
+	__HAL_RCC_I2C1_CLK_ENABLE();
+
+	/* Reset the peripheral before HAL_I2C_Init() configures it.
+	 *
+	 * Enabling the I2C clock while SCL/SDA are already sitting in some
+	 * arbitrary state can leave the block with BUSY latched in SR2, and
+	 * nothing HAL_I2C_Init() writes clears it: the peripheral then refuses
+	 * to generate a START forever and every transfer times out, on a bus
+	 * that is electrically perfect.  The symptom is a hardware scan that
+	 * finds nothing while a bit-banged scan on the same two pins finds the
+	 * device immediately — which is exactly how this was diagnosed on
+	 * 2026-09-04.  SWRST via the RCC is the only thing that clears it. */
+	__HAL_RCC_I2C1_FORCE_RESET();
+	__HAL_RCC_I2C1_RELEASE_RESET();
+}
+
+void HAL_I2C_MspDeInit(I2C_HandleTypeDef *hi2c)
+{
+	if (hi2c->Instance != I2C1)
+		return;
+
+	/* The pins are deliberately left configured.  The only caller is
+	 * ranger_bus_reset(), which de-initialises the peripheral and then
+	 * immediately takes PB6/PB7 over as open-drain GPIO to clock a stuck
+	 * slave free; releasing them here would only add a window in which the
+	 * bus floats. */
+	__HAL_RCC_I2C1_CLK_DISABLE();
+}
+
 /* USART1 -> PA9 (TX) / PA10 (RX), AF7 — the same pins as the H7 build, so the
  * M110 J22 link in WIRING.md section 4.2 needs no rewiring. */
 void HAL_UART_MspInit(UART_HandleTypeDef *huart)

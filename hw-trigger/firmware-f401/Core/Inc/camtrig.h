@@ -86,6 +86,27 @@ void camtrig_task(void *arg);
  * a flag, so pulses that arrive while the task is blocked are not lost. */
 void camtrig_notify_pulse_from_isr(BaseType_t *woken);
 
+/* Every UNSOLICITED line starts with this; no reply to a command does.
+ *
+ * Without it the console stream is ambiguous: a host that both streams range
+ * readings and issues commands over the one `/dev/ttyTHS1` cannot tell a
+ * spontaneous reading from the reply it is waiting for.  One character, and the
+ * demux is a prefix test.  (`burst done` was already unsolicited and unmarked —
+ * the same latent problem, just rarer.) */
+#define ASYNC_PREFIX	"!"
+
+/* Free-running pulse count, incremented in the TIM2 ISR and readable without
+ * the mutex — see the note at its definition in camtrig.c.  Use this to stamp
+ * anything produced while the trigger mutex is held or from another task; use
+ * camtrig_pulses() otherwise. */
+extern volatile uint32_t g_pulses_isr;
+
+/* Serialise output from another task against the command path, so a streamed
+ * line cannot land in the middle of a `status` reply.  Hold it for the PRINT
+ * only — never across a slow acquisition. */
+void camtrig_out_lock(void);
+void camtrig_out_unlock(void);
+
 /* Command interface.  `line` is modified in place. */
 void camtrig_handle(char *line, sink_t reply);
 void camtrig_banner(sink_t s);
