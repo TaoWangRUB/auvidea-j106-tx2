@@ -21,6 +21,7 @@
  */
 #include "main.h"
 #include "camtrig.h"
+#include "ranger.h"
 #include "cmsis_os2.h"
 #include "usbd_cdc_if.h"
 
@@ -50,6 +51,13 @@ static TaskHandle_t  g_trig_handle;
 
 static void lock(void)   { if (g_lock) osMutexAcquire(g_lock, osWaitForever); }
 static void unlock(void) { if (g_lock) osMutexRelease(g_lock); }
+
+/* The same mutex, exposed for the ranger task.  It guards output as well as
+ * trigger state (see the note above), which is exactly what a second producer
+ * of unsolicited lines needs — but only around the print.  Holding it across an
+ * I2C acquisition would stall the `trig` task for the whole conversion. */
+void camtrig_out_lock(void)   { lock(); }
+void camtrig_out_unlock(void) { unlock(); }
 
 static const uint32_t ch_of[NCH] = {
 	TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3, TIM_CHANNEL_4
@@ -408,6 +416,36 @@ static uint32_t parse_u32(const char *s)
 	return v;
 }
 
+/* Hex, with or without an 0x prefix.  I2C addresses and register numbers are
+ * quoted in hex everywhere in Garmin's manuals and in `i2cdetect` output, so
+ * accepting decimal here would just be an invitation to typo 0x62 as 62. */
+static uint32_t parse_hex(const char *s)
+{
+	uint32_t v = 0;
+	int seen = 0;
+
+	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+		s += 2;
+	while (*s) {
+		uint32_t d;
+
+		if (*s >= '0' && *s <= '9')
+			d = (uint32_t)(*s - '0');
+		else if (*s >= 'a' && *s <= 'f')
+			d = (uint32_t)(*s - 'a') + 10u;
+		else if (*s >= 'A' && *s <= 'F')
+			d = (uint32_t)(*s - 'A') + 10u;
+		else
+			return BAD_U32;
+		v = v * 16u + d;
+		seen = 1;
+		s++;
+	}
+	if (!seen)
+		return BAD_U32;
+	return v;
+}
+
 static void cmd_status(sink_t s)
 {
 	unsigned i;
@@ -447,7 +485,133 @@ static void cmd_status(sink_t s)
 	out_kvx(s, "sysmem_sp", g_sysmem_sp);
 	out_kvx(s, "sysmem_pc", g_sysmem_pc);
 	out_kvx(s, "sysmem_alt", g_sysmem_alt);
+	out_kv(s, "lidar_model", (uint32_t)ranger_model());
+	out_kvx(s, "lidar_addr", ranger_addr());
+	out_kv(s, "lidar_present", (uint32_t)ranger_present());
+	out_kv(s, "lidar_errors", ranger_errors());
+	out_kv(s, "lidar_last_cm", ranger_last_cm());
+	out_kv(s, "lidar_stream_div", ranger_stream_divisor());
 	out_puts(s, "ok\n");
+}
+
+/* Each sample costs an acquisition (5-20 ms on a v3) and the whole burst runs
+ * under the trigger mutex, so the ceiling is what bounds how long the `trig`
+ * task can be held off its pulse bookkeeping.  20 samples is ~0.5 s worst case
+ * — the LED blink pauses and a concurrent `burst` terminates late, which is why
+ * this is not unbounded.  Continuous logging belongs on the TX2 side, polling
+ * at whatever rate it actually needs. */
+#define RANGE_MAX_BURST  20u
+
+static void cmd_range(uint32_t n, sink_t s)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		uint16_t cm = 0;
+		rng_status_t st = ranger_measure(&cm);
+
+		if (st != RNG_OK) {
+			out_puts(s, "err ");
+			out_puts(s, ranger_strerror(st));
+			out_putc(s, '\n');
+			return;
+		}
+
+		/* Stamped with the trigger's own pulse counter.  That is the
+		 * entire reason the ranger lives on this board rather than on
+		 * the TX2's i2c: `seq` on the capture side advances exactly one
+		 * per trigger edge, so `pulses` is already the cameras' clock
+		 * and joining a range to a frame involves no timebase offset —
+		 * none of the Delta problem that WIRING.md section 4.4 exists
+		 * to solve for the IMU.
+		 *
+		 * g_pulses is read directly, NOT via camtrig_pulses(): the
+		 * mutex is held for the whole of camtrig_handle() and it is not
+		 * recursive, so the accessor would deadlock here. */
+		out_puts(s, "range_cm=");
+		out_putu(s, cm);
+		out_puts(s, " pulses=");
+		out_putu(s, g_pulses);
+		out_putc(s, '\n');
+	}
+	out_puts(s, "ok\n");
+}
+
+static void cmd_lidar(char *arg, sink_t s)
+{
+	char *second = split(arg);
+
+	if (!*arg) {
+		out_kv(s, "lidar_model", (uint32_t)ranger_model());
+		out_kvx(s, "lidar_addr", ranger_addr());
+		out_kv(s, "lidar_present", (uint32_t)ranger_present());
+		out_kv(s, "lidar_errors", ranger_errors());
+		out_puts(s, "ok\n");
+	} else if (str_eq(arg, "3") || str_eq(arg, "4")) {
+		ranger_set_model(arg[0] - '0');
+		out_puts(s, "ok\n");
+	} else if (str_eq(arg, "addr")) {
+		uint32_t v = parse_hex(second);
+
+		if (v == BAD_U32 || v < 0x08u || v > 0x77u)
+			out_puts(s, "err usage: lidar addr <hex 08..77>\n");
+		else {
+			ranger_set_addr((unsigned)v);
+			out_puts(s, "ok\n");
+		}
+	} else if (str_eq(arg, "scan")) {
+		ranger_scan(s);
+		out_puts(s, "ok\n");
+	} else if (str_eq(arg, "reg")) {
+		uint32_t v = parse_hex(second);
+		uint8_t val = 0;
+
+		if (v == BAD_U32 || v > 0xffu) {
+			out_puts(s, "err usage: lidar reg <hex 00..ff>\n");
+		} else {
+			rng_status_t st = ranger_read_reg((uint8_t)v, &val);
+
+			if (st != RNG_OK) {
+				out_puts(s, "err ");
+				out_puts(s, ranger_strerror(st));
+				out_putc(s, '\n');
+			} else {
+				out_kvx(s, "value", val);
+				out_puts(s, "ok\n");
+			}
+		}
+	} else if (str_eq(arg, "reset")) {
+		ranger_bus_reset();
+		out_puts(s, "ok\n");
+	} else if (str_eq(arg, "pins")) {
+		ranger_probe_pins(s);
+		out_puts(s, "ok\n");
+	} else if (str_eq(arg, "bb")) {
+		ranger_bitbang_scan(s, str_eq(second, "swap"));
+		out_puts(s, "ok\n");
+	} else if (str_eq(arg, "hw")) {
+		ranger_dump_hw(s);
+		out_puts(s, "ok\n");
+	} else if (str_eq(arg, "io")) {
+		if (str_eq(second, "bb") || str_eq(second, "hw")) {
+			ranger_set_io(str_eq(second, "bb"));
+			out_puts(s, "ok\n");
+		} else {
+			out_puts(s, "err usage: lidar io <bb|hw>\n");
+		}
+	} else if (str_eq(arg, "khz")) {
+		uint32_t v = parse_u32(second);
+
+		if (v == BAD_U32 || v < 1u || v > 400u) {
+			out_puts(s, "err usage: lidar khz <1-400>\n");
+		} else {
+			ranger_set_speed(v * 1000u);
+			out_puts(s, "ok\n");
+		}
+	} else {
+		out_puts(s, "err usage: lidar "
+			    "[3|4|addr|scan|reg|reset|pins|bb|hw|khz|io]\n");
+	}
 }
 
 static void cmd_help(sink_t s)
@@ -466,6 +630,26 @@ static void cmd_help(sink_t s)
 		 "  start | stop\n"
 		 "  burst <n>      emit n pulses then stop\n"
 		 "  status | help\n"
+		 "Garmin LIDAR-Lite on I2C1, PB6=SCL PB7=SDA\n"
+		 "  range [n]      n acquisitions (1..20), cm, stamped with\n"
+		 "                 the trigger pulse counter\n"
+		 "  range auto <n>   stream one reading every n trigger\n"
+		 "                 pulses; 0 = off.  Lines start with `!`,\n"
+		 "                 as all unsolicited output does.  A missing\n"
+		 "                 sensor is skipped, never fatal\n"
+		 "  lidar          report model, address, probe result\n"
+		 "  lidar 3|4      register map: 3 = v3/v3HP, 4 = v4 LED\n"
+		 "                 WRONG MAP READS A PLAUSIBLE WRONG NUMBER\n"
+		 "  lidar addr <h> i2c address in hex, default 62\n"
+		 "  lidar scan     list every address that ACKs\n"
+		 "  lidar reg <h>  read one register, hex\n"
+		 "  lidar reset    9-clock bus recovery, then re-init\n"
+		 "  lidar pins     electrical state of SCL/SDA - tells an\n"
+		 "                 unwired bus from one held low\n"
+		 "  lidar bb [swap]  bit-banged scan; `swap` tries the\n"
+		 "                 SCL/SDA roles the other way round\n"
+		 "  lidar io bb|hw   transport: bit-bang (default, works) or\n"
+		 "                 the I2C peripheral (NAKs on this rig)\n"
 		 "ok\n");
 }
 
@@ -539,6 +723,28 @@ void camtrig_handle(char *line, sink_t s)
 			g_opto_skew_ns = v;
 			apply(APPLY_KEEP, g_period_ns, 0, s);
 		}
+	} else if (str_eq(line, "range")) {
+		char *second = split(arg);
+
+		if (str_eq(arg, "auto")) {		/* "range auto <n|0>" */
+			uint32_t d = parse_u32(second);
+
+			if (d == BAD_U32) {
+				out_puts(s, "err usage: range auto <pulses, 0=off>\n");
+			} else {
+				ranger_set_stream(d);
+				out_puts(s, "ok\n");
+			}
+		} else {
+			uint32_t n = *arg ? parse_u32(arg) : 1u;
+
+			if (n == BAD_U32 || n == 0 || n > RANGE_MAX_BURST)
+				out_puts(s, "err usage: range [1-20] | range auto <n>\n");
+			else
+				cmd_range(n, s);
+		}
+	} else if (str_eq(line, "lidar")) {
+		cmd_lidar(arg, s);
 	} else if (str_eq(line, "dfu")) {
 		/* Reply and drain before resetting: the host must see the "ok"
 		 * before the device drops off the bus, or `make flash` cannot
@@ -605,8 +811,21 @@ void camtrig_banner(sink_t s)
 	unlock();
 }
 
+/* Free-running copy of the pulse count, maintained in the ISR.
+ *
+ * g_pulses is owned by the `trig` task and guarded by the mutex, which makes it
+ * useless as a timestamp for anything that runs while that mutex is held — the
+ * count simply stops advancing, so every reading in a burst got the same stamp.
+ * This one advances on the hardware event itself and is readable lock-free, so
+ * a range sample can be stamped with the edge it actually belongs to.
+ *
+ * Deliberately additive: g_pulses keeps its exact previous meaning and the
+ * burst logic is untouched.  A u32 at 60 fps wraps in 2.3 years. */
+volatile uint32_t g_pulses_isr;
+
 void camtrig_notify_pulse_from_isr(BaseType_t *woken)
 {
+	g_pulses_isr++;
 	if (g_trig_handle)
 		vTaskNotifyGiveFromISR(g_trig_handle, woken);
 }
@@ -649,7 +868,7 @@ void camtrig_task(void *arg)
 		}
 
 		if (done) {
-			out_puts(SINK_ALL, "burst done pulses=");
+			out_puts(SINK_ALL, ASYNC_PREFIX "burst done pulses=");
 			out_putu(SINK_ALL, done_at);
 			out_putc(SINK_ALL, '\n');
 		}

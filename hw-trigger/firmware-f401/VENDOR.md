@@ -14,6 +14,34 @@ The one local change is `USB_DEVICE/Target/usbd_conf.c`, noted at the bottom.
 | USB Device Library (Core + CDC) | `STMicroelectronics/stm32-mw-usb-device` | WeAct's `03-CDC_Standalone` project |
 | FreeRTOS kernel **V10.3.1** + CMSIS-RTOS2 | `STMicroelectronics/stm32-mw-freertos` | copied from [`../firmware/`](../firmware/), same version as the H7 build |
 | FreeRTOS **ARM_CM4F** port | `FreeRTOS/FreeRTOS-Kernel` tag `V10.3.1-kernel-only` | `portable/GCC/ARM_CM4F/{port.c,portmacro.h}` |
+| HAL **I2C** driver | `STMicroelectronics/stm32f4xx_hal_driver` tag **`v1.7.8`** | ST's repository directly — see below |
+
+## The I2C driver came from ST, not from WeAct
+
+`Drivers/STM32F4xx_HAL_Driver/{Src,Inc}/stm32f4xx_hal_i2c{,_ex}.{c,h}` are the only HAL files here
+that are **not** from WeAct's `03-CDC_Standalone` project: that project does not use I2C, so it does
+not ship them. The tag `v1.7.8` was chosen to match the version already vendored, which the tree
+states itself:
+
+```c
+/* Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.c */
+#define __STM32F4xx_HAL_VERSION_MAIN   (0x01U)
+#define __STM32F4xx_HAL_VERSION_SUB1   (0x07U)
+#define __STM32F4xx_HAL_VERSION_SUB2   (0x08U)   /* -> 1.7.8 */
+```
+
+Check that macro before adding any further HAL module and take the matching tag — mixing HAL
+versions inside one tree works right up until it silently does not. Both files are unmodified.
+
+Nothing in the `Makefile` needed changing: `C_SOURCES` already globs
+`$(wildcard Drivers/STM32F4xx_HAL_Driver/Src/*.c)` and `$(wildcard Core/Src/*.c)`, so dropping the
+files in and adding `Core/Src/ranger.c` was enough. `stm32f4xx_hal_i2c.h` includes
+`stm32f4xx_hal_i2c_ex.h`, so both pairs are required.
+
+This driver is the ranger's default transport. It did not work at first — see the transport note at
+the top of [`Core/Src/ranger.c`](Core/Src/ranger.c) for the two faults involved — but with the
+cabling corrected and `Mem_Read()` replaced by `Master_Transmit` + `Master_Receive` it runs clean.
+The bit-banged master is kept alongside it as a fallback and a diagnostic.
 
 ## Why the HAL and USB stack came from WeAct rather than from ST directly
 

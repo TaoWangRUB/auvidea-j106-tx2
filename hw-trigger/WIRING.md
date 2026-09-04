@@ -549,6 +549,166 @@ tracking.
 `GNSS_PPS` (`J21` pin 7) is the semantically nicer pin for the echo if it maps to a Tegra GPIO on
 TX2 — unverified, whereas `gpio-389` has been checked on the live board.
 
+### 4.5 Garmin LIDAR-Lite ranger — MCU ↔ sensor (optional, 4 nets)
+
+✅ **WORKING 2026‑09‑04.** `range` returns centimetres over the same `/dev/ttyTHS1` console as
+everything else.
+
+| From (sensor) | → | To (WeAct) | Silkscreen | Notes |
+|---|---|---|---|---|
+| `5V` | ← | 5 V rail | **`5V`** | the same rail feeding the board (M110 `J22` pin 1, or USB) |
+| `GND` | — | Ground | **`GND`** | |
+| `SCL` | ↔ | `I2C1_SCL` (`PB6`) | **`B6`** | AF4 |
+| `SDA` | ↔ | `I2C1_SDA` (`PB7`) | **`B7`** | AF4 |
+| pull-ups | | 4.7 kΩ each, `B6`→`3V3` and `B7`→`3V3` | | **required** — the MCU's internal ones are tens of kΩ, far too weak |
+| bulk cap | | 680 µF electrolytic across 5 V/GND **at the sensor** | | Garmin requires it on v2/v3/v3HP; the acquisition current spike browns the module out without it |
+
+Port B was entirely unused before this, so nothing collides: `PA0`–`PA3` are the trigger, `PA5` the
+Δ echo (§4.4), `PA9`/`PA10` the console (§4.2), `PA11`/`PA12` USB, `PC13` the LED. Go by the
+**silkscreen letters**, as everywhere else in this document.
+
+⚠ **Do not twist SDA and SCL together as a pair** — it cost a session here, see below.
+
+**The isolation is not affected.** The sensor ties to *MCU* ground, not camera ground; the
+optocoupler barrier is inside the camera modules and is untouched (§3). It does put the sensor on
+TX2 ground, but the §4.2 console link already does that.
+
+#### Which module — determined by measurement, not by the label
+
+v3/v3HP and v4 LED both answer at `0x62` and both start an acquisition identically, but they report
+the distance differently, so **the wrong map returns a plausible-looking wrong number**. This rig's
+module was identified on the bench rather than assumed:
+
+```
+lidar reg 0f -> 0x00      # v3 FULL_DELAY_HIGH
+lidar reg 10 -> 0x55      # v3 FULL_DELAY_LOW  = 85 cm
+range        -> 85 cm     # via 0x8f, big-endian     <- agrees
+lidar 4; range -> 21845   # = 0x5555 : reading 2 bytes at 0x10 returned the
+                          #   SAME register twice, so the part does not
+                          #   auto-increment without bit 7 set -> it is a v3
+```
+
+That last line is the useful test: on a v4 LED, `0x10`/`0x11` are the low and high halves and a
+2-byte read there is the correct way to get the distance. Getting the same byte twice proves the
+opposite part. Set `lidar 3` or `lidar 4` accordingly; the default is 3.
+
+#### ⚠ Two faults that presented as one — SDA/SCL twisted, and repeated-START reads
+
+Both are fixed. Both are recorded because each one alone is easy to misdiagnose as the other, and
+the first produced a measurement that pointed exactly the wrong way.
+
+**Fault 1 — SDA and SCL twisted together as a pair.** The hardware master NAKed every address
+(`HAL_I2C_ERROR_AF`) while a bit-banged master on the *same two pins* found `0x62` every time.
+Twisting the two signal lines together maximises their mutual capacitance, so every SCL edge couples
+a spike onto SDA. The F4 samples SDA a short, **fixed** delay after the SCL rising edge — right in
+that spike. The bit-bang waits for SCL to actually reach a high level and then waits another
+half-period (~8 µs) before sampling, by which time it has decayed.
+
+> ⚠ **A bus-speed sweep that changes nothing is evidence *for* edge-coupled noise, not against it.**
+> Sweeping 100 → 50 → 20 → 10 → 5 kHz behaved identically, which read as "not a signal-integrity
+> problem" and cost most of the session. It is not: slowing the bus lengthens the period but **not**
+> the edge-to-sample delay, so the spike stays exactly where it was relative to the sample point.
+
+**Do not twist SDA and SCL together.** Twist each with a ground return, or run them as plain
+parallel conductors. This is the opposite of the §5 advice for the *trigger* pairs, and for a good
+reason: those are four independent single-ended signals with their own returns, where twisting
+signal-to-return is right. SDA and SCL are two lines of one bus that switch against each other.
+
+**Fault 2 — repeated-START reads.** With the wiring corrected the hardware master addressed the
+sensor fine and then read **all-zero data from every register, with no error reported**.
+`HAL_I2C_Mem_Read()` issues a repeated START between the register pointer and the data phase.
+Garmin's own Arduino library ends the pointer write with a STOP (`endTransmission()`, then
+`requestFrom()`), and the bit-banged path did the same and read correctly on identical wiring. So
+`ranger.c` uses `HAL_I2C_Master_Transmit` + `HAL_I2C_Master_Receive`, not `Mem_Read`.
+
+With both fixed the two transports agree — 182–185 cm against 184 cm, 40 hardware acquisitions with
+zero errors — and the hardware peripheral is the default. The bit-bang stays available because it
+costs little, is immune to every I2C erratum the F4 has, and is what made the first fault visible at
+all.
+
+| Command | Use |
+|---|---|
+| `lidar io bb` / `lidar io hw` | switch transport |
+| `lidar bb [swap]` | software address scan, optionally with SCL/SDA roles exchanged |
+| `lidar pins` | fight each pin against an internal pull — tells an unwired bus from one held low |
+| `lidar hw` | raw I2C1 + GPIO registers, and the last HAL error code |
+| `lidar khz <n>` | bus speed; 100 is the v3 ceiling, 400 also runs clean here |
+
+#### Streaming, and one cable that carries both directions
+
+`/dev/ttyTHS1` is full duplex and carries the range stream **and** trigger control at once. The
+constraint was never the wire — it is that only one process may own the fd, or two readers steal
+each other's bytes. So one owner (the ROS2 node) multiplexes.
+
+```
+range auto <n>      one reading every n trigger pulses; 0 = off
+range auto 0        stop
+```
+
+Phase-locked to the trigger, not to a timer, so a reading belongs to a specific frame by
+construction — `pulses` advances by exactly `n` per line, and the capture side's `seq` advances one
+per edge. No clock comparison anywhere.
+
+**Every unsolicited line starts with `!`; no reply to a command does.** That one character is what
+makes the shared port demuxable. (`burst done` was already unsolicited and unmarked — the same
+latent problem, now fixed.) Measured with `range auto 15` running at 30 fps:
+
+```
+!range_cm=182 pulses=2885     <- stream, 2 Hz, stamp advances by exactly 15
+!range_cm=181 pulses=2900
+clock=hse25-pll84             <- reply to a concurrent `status`, no prefix
+timer_hz=84000000
+```
+
+Bandwidth is a non-issue: ~24 bytes a line, so even one reading per trigger edge at 30 fps is
+~720 B/s against 11.5 kB/s available.
+
+> **micro-ROS / micro-XRCE-DDS on the MCU was considered and rejected.** It solves transport, which
+> was never the bottleneck, and it would *worsen* the thing that makes this arrangement worth having:
+> its time sync is an NTP-style round trip good to about a millisecond, replacing an exact integer
+> join on the pulse counter. It also puts a middleware with its own tasks and heap inside the MCU
+> that generates the camera trigger, on a part with 96 kB of SRAM. Do the DDS on the TX2.
+
+#### A missing rangefinder is a normal state, never a failure
+
+The node on the other end of this UART also carries **trigger control**, so an absent ranger must
+never escalate — otherwise unplugging a sensor takes camera triggering down with it. The firmware
+therefore treats absence as a state, not an error:
+
+- the `rng` task never stops; the sensor can be plugged in later and simply starts working
+- the absent/present **transition** is announced once; the steady state is silent, so a missing
+  sensor cannot flood the link the trigger commands share
+- retries back off to one every 2 s rather than running at the streaming rate, because a probe
+  against an empty bus costs a full bus timeout
+
+Silence is not the same as hiding it — `status` always carries `lidar_present`, `lidar_errors`,
+`lidar_last_cm` and `lidar_stream_div`. Verified by pointing the driver at a bogus address:
+
+```
+lidar addr 55   ->  !range absent - continuing without it     (ONE line in 12 s)
+fps 30          ->  ok                                        (trigger control unaffected)
+lidar addr 62   ->  !range present again                      (resumes by itself)
+                    !range_cm=173 pulses=4370
+```
+
+#### Why the ranger is on the MCU and not on the TX2's i2c
+
+The M110 does break I2C out — the 10-pin SPI/GPIO header carries `I2C0_CLK`/`I2C0_DAT` at 3.3 V,
+with 5 V and GND on the same connector. Three reasons not to use it:
+
+1. That pinout is from the manual's **M100** section; its M110 chapter is still "1. to be added",
+   and this manual labels two different tables `(J21)` (§4.4). Unverified on this board.
+2. `I2C0` is a **camera bus** — the J106 manual maps it to CSI‑A/CSI‑B through the address shifter.
+   CSI‑A/B are unpopulated here, but this is the board where a wedged i2c already needs
+   `j106_reset_recover`.
+3. **Timestamps.** The MCU owns TIM2, the timebase the cameras expose against, so a reading taken
+   here is stamped with the trigger's own pulse counter and joins to a frame with no Δ at all —
+   none of the problem §4.4 exists to solve for the IMU.
+
+⚠ The pulse stamp is taken per *command*, and `range <n>` holds the trigger mutex for the whole
+burst, so all `n` samples in one burst carry the **same** `pulses` value. Use `range` (n = 1) when
+the stamp matters.
+
 ---
 
 ## 5. Cable practice and harness topology
