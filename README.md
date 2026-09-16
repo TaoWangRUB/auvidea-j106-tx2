@@ -1497,6 +1497,21 @@ The historical pre-wiring notes follow.
   ODMDATA **J2 has no SS lane at all** and only J3 can ever train. Testing J3 therefore removes lane
   muxing as a variable, and it still does not train. The enclosure did **not** brown out at USB2 draw.
 
+  **The adapter is the one variable never changed — and it is a spec‑forbidden part.** Every test in
+  the matrix above ran through a **USB3 micro‑A male → Type‑C female** adapter. The USB Type‑C spec
+  explicitly does not define or allow *any* legacy adapter carrying a **Type‑C receptacle**, so this
+  part is outside every compliance program and its internals are arbitrary — cheap ones routinely
+  wire only VBUS/GND/D+/D− and leave the SS pairs unconnected, which reproduces this exact signature.
+  A micro plug carries **one** SS pair set while a Type‑C receptacle has **two** (TX1/RX1, TX2/RX2)
+  for flip support, so such an adapter can only ever wire one of them. **Flipping the Type‑C plug
+  180° was tested 2026‑09‑16 and changed nothing** (drive re‑enumerated, still High‑speed, SS ports
+  still `RxDetect`) — orientation is ruled out, leaving "no SS wiring in the adapter" as the live
+  hypothesis. Note the micro‑**A** keying buys nothing here: pin 4 (`USB ID`) is not connected and
+  `usb2-2` is `mode = "host"` unconditionally, so no OTG signalling is needed — only SS continuity.
+  **Until a compliant micro → Type‑A *female* adapter (DeLOCK 83469) is tried, "the fault is physical
+  below the SoC" is not established** — a single untested component is common to 100% of the
+  negative results.
+
 
 - **USB bus power is 900 mA shared across J2+J3** (`USB1_EN_OC`, tech ref) — an NVMe enclosure
   (Corsair MP510 + RTL9210) browns out on it: enumerates, then `Read Capacity(10) failed`
