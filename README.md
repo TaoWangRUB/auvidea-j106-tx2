@@ -1473,12 +1473,29 @@ The historical pre-wiring notes follow.
   ~1.02 s until "no end points detected" at ~3.69 s, but a DTB with the PCIe controller fully
   disabled changed nothing.
 
-  **Leading remaining suspect — cable role.** J2/J3 are micro‑USB3 **sockets used as host ports**.
-  A normal micro‑B cable is wired for the *peripheral* end, so using one inverted puts TX against TX
-  on the SS pairs while USB2 (no role crossover) keeps working perfectly — exactly the signature
-  measured. A cable verified at USB3 against a RealSense T265 does **not** verify this orientation.
-  The tech ref calls for a **DeLOCK 83469** micro‑B → A‑female **OTG** adapter; try that first.
-  If it and the ODMDATA revert both fail, conclude the carrier's SS traces don't work with a TX2.
+  **Leading remaining suspect — cable role, now backed by the pin table.** J2/J3 are micro‑USB3
+  **sockets used as host ports**, and the tech ref's own pinout shows they are wired *role‑inverted*
+  relative to a normal peripheral micro‑B: pins 6/7 are `USB3_RX` (**Jetson receives**) and pins 9/10
+  are `USB3_TX` (**Jetson transmits**), whereas a standard micro‑B device receptacle transmits on 6/7
+  and receives on 9/10. The crossover is therefore **already applied on the carrier PCB**. A normal
+  micro‑B cable (micro‑B→A or micro‑B→C, the kind sold for external drives) applies a *second*
+  crossover because it assumes the micro‑B end is the peripheral — net TX↔TX and RX↔RX, so no far‑end
+  receiver termination is ever sensed and the port sits in `RxDetect` forever, while USB2 (D+/D−, no
+  role crossover) works perfectly. That is exactly the measured signature. Note pin 4 (`USB ID`) is
+  **not connected** on either socket, so an adapter's ID grounding is irrelevant here — `usb2-2` is
+  `mode = "host"` unconditionally in DT. The only thing that matters is SS pair orientation, so the
+  part must be a straight‑through micro‑B → A‑**female** host adapter: the tech ref names
+  **DeLOCK 83469**. A cable verified at USB3 against a RealSense T265 does **not** verify this
+  orientation. If that adapter also fails, conclude the carrier's SS traces don't work with a TX2.
+
+  **Retest 2026‑09‑16 — both ports, deployed DTB + stock ODMDATA.** A Ugreen RTL9210 enclosure
+  (Toshiba KXG6AZNV 256 GB NVMe) was tested on **J2** and then **J3**; both enumerate High‑speed only,
+  **37.9 MB/s** and **38.4 MB/s** respectively (USB 2.0 ceiling). xHCI PORTSC with the drive attached
+  shows all three SS ports in `RxDetect`/`CCS=0` in both cases, the drive appearing on USB2 port 5
+  (`usb2-1` = J2) then port 6 (`usb2-2` = J3). `/chosen/plugin-manager/odm-data/` confirms the single
+  XUSB lane — `enable-xusb-on-uphy-lane0` with lanes 1/2/4 on PCIe and lane 5 on SATA — so under stock
+  ODMDATA **J2 has no SS lane at all** and only J3 can ever train. Testing J3 therefore removes lane
+  muxing as a variable, and it still does not train. The enclosure did **not** brown out at USB2 draw.
 
 
 - **USB bus power is 900 mA shared across J2+J3** (`USB1_EN_OC`, tech ref) — an NVMe enclosure
