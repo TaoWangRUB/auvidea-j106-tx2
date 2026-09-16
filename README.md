@@ -1508,9 +1508,25 @@ The historical pre-wiring notes follow.
   still `RxDetect`) — orientation is ruled out, leaving "no SS wiring in the adapter" as the live
   hypothesis. Note the micro‑**A** keying buys nothing here: pin 4 (`USB ID`) is not connected and
   `usb2-2` is `mode = "host"` unconditionally, so no OTG signalling is needed — only SS continuity.
-  **Until a compliant micro → Type‑A *female* adapter (DeLOCK 83469) is tried, "the fault is physical
-  below the SoC" is not established** — a single untested component is common to 100% of the
-  negative results.
+  **A second, different adapter also fails (2026‑09‑16).** A micro → **Type‑A female** adapter
+  (blue, USB3‑marked) was substituted for the micro‑A→C‑female one: the drive re‑enumerated (dev 8)
+  and still came up **High‑speed, 37.5 MB/s**, all SS ports `RxDetect`. Two independent adapters
+  failing identically weakens "this one adapter has no SS wiring", though it does not eliminate it —
+  SS‑unwired adapters are common enough that two duds is plausible. Note a Type‑A *female* adapter
+  still requires a second **A‑male → C‑male** cable to reach the enclosure, so that cable is now an
+  untested link in the chain too (a USB 2.0 A plug has 4 contacts, a USB 3.0 one has 9).
+
+  **The decisive test is now a continuity check, not another swap.** Probe the micro plug's pins
+  6/7/9/10 against the downstream receptacle's SS pins (Type‑A: 5/6 = StdA_SSRX−/+, 8/9 =
+  StdA_SSTX−/+; prove the probe first with micro 2/3 → A‑plug D−/D+). Open on all four = the adapter
+  is USB 2.0 inside and the carrier is exonerated. Continuity present + still `RxDetect` = the fault
+  really is the carrier's SS traces with a TX2. Until one of those two is measured, **"the fault is
+  physical below the SoC" remains unestablished.**
+
+  **Independent evidence the host side is fine:** the same VIA Labs `2109:0817` self‑powered hub that
+  shows only its USB2 function (`2109:2817`) on the TX2 enumerates at **5000M** on the dev host,
+  carrying a Genesys card reader and an RTL8153 NIC both at 5000M. So the failure is not specific to
+  the Ugreen/RTL9210 enclosure.
 
 
 - **USB bus power is 900 mA shared across J2+J3** (`USB1_EN_OC`, tech ref) — an NVMe enclosure
