@@ -19,6 +19,25 @@ sudo systemctl enable --now j106-recovery-key.service
 ```
 To boot back out of recovery, tap **Reset** (without holding recovery).
 
+## j106-portsc — read the xHCI PORTSC registers
+
+The only view that separates *"nothing is plugged in"* from *"a device is plugged in and
+never trains"*. Read-only through `/dev/mem`, so it needs `sudo`:
+
+```bash
+sudo ./j106-portsc.py            # defaults to the TX2 host controller at 0x3530000
+```
+
+Ports on this carrier are `1..3` = SuperSpeed (`usb3-0..2`), `4` = `usb2-0` (micro-USB OTG,
+where the camtrig STM32 sits), `5` = `usb2-1` (**J2**, silkscreen "USB1"), `6` = `usb2-2`
+(**J3**, silkscreen "USB2"), `7` = `usb2-3`.
+
+`CCS=0 PP=1 PLS=RxDetect` is powered-and-polling with no far-end receiver detected. Note that
+a USB3 device which has committed to SuperSpeed withholds its USB 2.0 pull-up, so a stalled
+enclosure shows `CCS=0` on **both** its SS port and its USB2 port and looks exactly like an
+empty socket — replug it physically before concluding anything (an `xhci` unbind/bind does
+not cycle VBUS). See README §7 for the J3 SuperSpeed story this was written for.
+
 ## j106-trigctl — drive the IMX296 external-trigger generator
 
 **Runs wherever the serial link is** — on the board if the STM32H7 is wired to M110 `J22`
