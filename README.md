@@ -1399,15 +1399,69 @@ The historical pre-wiring notes follow.
 - **Argus 5‑session start race** — Stage 6; use the restart‑daemon + retry workaround.
 
 ### ❌ Open / hardware‑limited
-- **USB 3.0 on J2/J3 (2026‑09‑02)** — **Every software configuration is exhausted, including
-  Auvidea's exact shipping config. The SS link does not train. The fault is physical, below the
-  SoC.** Stock is wired for the devkit, so *both*
-  J106 connectors are USB‑2‑only: on the J106 the SS lanes pair with the *other* USB2 ports —
-  `usb3-0`↔`usb2-2` (**J3**, silkscreen "USB2") and `usb3-1`↔`usb2-1` (**J2**, silkscreen "USB1")
-  — whereas stock points `usb3-0` at `usb2-1` and disables `usb3-1`. Fixed in
-  [`override-usb.dtsi`](tx2-j106-6csi/override-usb.dtsi), applied **twice** (static padctl node
-  **and** `/plugin-manager/fragment-500-xusb-config`, which rewrites the ports unconditionally for
-  this SKU and silently undoes a static‑only patch).
+- **USB 3.0 on J3 — SOLVED 2026‑09‑23: 5 Gbps, 353 MB/s write / 372 MB/s read.** The SS pairs were
+  always wired and always reached the module; every stock micro‑B adapter crosses TX↔RX. Swapping the
+  two SS pairs inside the cable fixed it — no further software change was needed.
+
+  *Balls.* TX2 OEM Design Guide pin matrix: `H41/H42` = **PEX1_RX**, `E41/E42` = **PEX1_TX** (J106 **J3**,
+  silkscreen USB2); `F43/F44` = **USB_SS0_RX**, `C43/C44` = **USB_SS0_TX** (J106 **J2**, USB1). SATA is
+  `E45/E46/G45/G46` — the tech‑ref "J3 is SATA by default" is TX1‑only. Both ball groups are driven
+  by **UPHY lane 0 = `usb3-0`** through a mux **on the module**, selected by `QSPI_IO2` =
+  `TEGRA_MAIN_GPIO(R,3)` = gpio **459**: low → PEX1 (J3), high/float → USB_SS0 (J2). Stock
+  `ODMDATA=0x1090000` owns lane 0 only, so exactly **one** of J2/J3 can be SuperSpeed on a TX2
+  (Auvidea: J120 "only the upper port"). Live UPHY owners (`0x0252x284`): lane0 XUSB, 1–4 PCIe, 5 SATA.
+
+  *Pairing.* J3's D+/D− is `B42/B43` = `usb2-2` = `usb 1-3` — the only host pair that enumerates the
+  RTL9210 enclosure here. So SuperSpeed goes to **J3**: `usb3-0` companion **2** (Auvidea's J90/J120
+  shipping map) **plus the `pcie0_lane2_mux` hog** (gpio 459 low). `usb3-1` stays disabled.
+
+  *The A/B that proves the wiring.* With `j106auv` (companion 2, mux floating) the SSD on J3 runs at
+  480 Mb/s. Drive gpio 459 **low** and replug: the enclosure **stops enumerating entirely, even USB 2**
+  — it senses a SuperSpeed host on its SS pair and stalls in link training instead of falling back;
+  gpio 459 **high** and replug: 480 Mb/s again. The mux state could not matter if the adapter carried
+  no SS wires, so the SS pairs *do* reach the enclosure — and the host side sees **no** receiver
+  (`PORTSC[0]` `RxDetect`/`CCS=0`, polled at 5 ms for 12 s: never `Polling`/`Compliance`). That is
+  TX↔TX / RX↔RX. It also explains "J2 is dead even for USB 2": J2 gets lane 0 by default, so a device
+  there stalls the same way.
+
+  *Why.* J106 puts **module RX on pins 6/7** and TX on 9/10. Spec OTG adapters (micro‑B male → A
+  female, incl. the tech‑ref's DeLOCK 83469, a Galaxy Note 3 OTG cable) route pins 6/7 → `StdA_SSTX`
+  → device **RX**. Fix = a **micro‑B → A‑male (external‑HDD) cable + USB3 A‑female/A‑female coupler**
+  → normal A→C cable to the enclosure, or swap 6/7 ↔ 9/10 inside an adapter.
+
+  *Measured 2026‑09‑23, J3, booted `j106usb3j3`, enclosure replugged after the swap.*
+
+  ```
+  usb 2-1: new SuperSpeed USB device number 2 using tegra-xusb
+           0bda:9210 Ugreen Storage Device   speed=5000   bcdUSB 3.20
+  PORTSC port 1 (usb3-0 = J3):  CCS=1 PED=1 PLS=U0 speed=SuperSpeed
+  sd 2:0:0:0: [sda] 500118192 512-byte logical blocks: (256 GB/238 GiB)
+  dd 800 MiB oflag=direct -> 353 MB/s write ;  iflag=direct -> 372 MB/s read
+  ```
+
+  Up from the 38 MB/s that was the ceiling for this whole investigation, and comfortably above the
+  ~190 MB/s that 4× IMX296 raw at 30 fps needs — USB storage on this carrier is now a viable
+  recording target. The rewire that did it is drawn in
+  [`captures/usbc-swap-before-after.png`](captures/usbc-swap-before-after.png): the swap was made at
+  the **Type‑C end** of the micro‑B→C cable (`A2↔B11`, `A3↔B10`), which is the same crossing as
+  6/7↔9/10 at the micro end but far easier to solder. Cross at **exactly one** place in the chain.
+
+  *Deployed.* `override-usb.dtsi` = `usb3-0` companion 2 + `pcie0_lane2_mux` okay + VBUS/oc-pin
+  stock. Built `/boot/j106-usb3j3.dtb`, extlinux **`LABEL j106usb3j3`**, and **`DEFAULT` is now
+  `j106usb3j3`** (was `j106auv`; backup at `/boot/extlinux/extlinux.conf.bak.pre-usb3j3`). Runtime
+  toggle for tests: `echo 459 > /sys/class/gpio/export; echo out > …/direction;
+  echo 0 > …/value` (low = SS on J3) — the enclosure must be **physically replugged** after any
+  change. An `xhci` unbind/bind is **not** enough: it does not cycle VBUS, and a USB3 device that has
+  committed to SuperSpeed withholds its USB 2.0 pull-up, so a stalled enclosure reads `CCS=0` on
+  *both* its SS port and its USB2 port — indistinguishable from an empty socket until you replug.
+  [`tools/j106-portsc.py`](tools/j106-portsc.py) is what reads that out.
+  Do not force `vdd-usb1-5v` on (gpio 413 high → `port 1 over-current`); J3 has 5 V in the stock state.
+
+  Historical notes below are the investigation log; they do **not** describe the current DTB.
+
+  Previous J120 copy, applied **twice** in [`override-usb.dtsi`](tx2-j106-6csi/override-usb.dtsi)
+  (static padctl **and** `/plugin-manager/fragment-500-xusb-config`, which rewrites the ports
+  unconditionally for this SKU and silently undoes a static‑only patch):
 
   Confirmed independently from Auvidea's own **J120 4.2** package
   ([`bsp-r32.2/j120-v2.0/`](bsp-r32.2/j120-v2.0/)): a subtree diff of their shipped c03 DTB against

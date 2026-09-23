@@ -56,100 +56,68 @@
 
 
 
-/* Carrier USB 3.0 routing — matched to Auvidea's shipped J10x/J120 DTB.
+/* Carrier USB 3.0 on J3 (silkscreen USB2) — one SS lane, steered to PEX1.
  *
- * Symptom: any USB3 device in either J106 connector enumerates high-speed (480 Mb/s) on
- * bus 1 and never on bus 2; the 5000M root hub stays empty.
+ * TX2 module balls (OEM Design Guide pin matrix, row 41-43):
+ *   H41/H42 = PEX1_RX, E41/E42 = PEX1_TX          -> J106 J3 pins 6/7, 9/10
+ *   F43/F44 = USB_SS0_RX, C43/C44 = USB_SS0_TX    -> J106 J2 pins 6/7, 9/10
+ *   SATA is E45/E46/G45/G46 (the tech-ref "SATA by default" note is TX1-only).
+ * Both ball groups are fed by UPHY lane 0 = usb3-0 through a mux ON THE MODULE,
+ * selected by QSPI_IO2 = TEGRA_MAIN_GPIO(R,3) = gpio 459: low -> PEX1 (J3),
+ * high/float -> USB_SS0 (J2). Stock ODMDATA 0x1090000 owns lane 0 only, so
+ * exactly one of J2/J3 can be SuperSpeed. J3 is chosen because its D+/D-
+ * (B42/B43 = usb2-2 = usb 1-3) is the pair that enumerates on this board, and
+ * Auvidea's own J90/J120 DTBs pair usb3-0 with usb2-2 as well.
  *
- * Cause: stock is wired for the devkit. On the J106 the SS lanes pair with the OTHER USB2
- * ports — usb3-0 with usb2-2 (J3, silkscreen "USB2") and usb3-1 with usb2-1 (J2,
- * silkscreen "USB1"). Under stock, usb3-0 points at usb2-1 and usb3-1 is disabled, so J2
- * gets the wrong SS port and J3 gets none — both connectors fall back to USB 2.0.
+ * Verified live 2026-09-17: gpio 459 unclaimed at boot; driving it low with an
+ * RTL9210 enclosure on J3 makes the enclosure stop enumerating even at HS
+ * (it senses a SuperSpeed host and stalls in training), driving it high brings
+ * HS back. So the SS pairs do reach J3 through the cable; they are crossed.
+ * J106 puts module RX on pins 6/7, which an OTG-style micro-B->A-female
+ * adapter routes to StdA_SSTX -> device RX. Use a micro-B->A-MALE (HDD) cable
+ * plus an A-A female coupler, or swap 6/7 <-> 9/10 in the adapter.
  *
- * Confirmed twice, independently:
- *   - Auvidea's shipped c03 DTB (bsp-r32.2/j120-v2.0, J120_4.2.zip). A subtree diff against
- *     stock shows EXACTLY three padctl changes, all reproduced below:
- *         usb2-2: + nvidia,oc-pin = <1>
- *         usb3-0: companion 1 -> 2
- *         usb3-1: disabled -> okay
- *     plus xhci carrying both SS phys.
- *   - Their own J120_rev9_second_USB.txt encodes the same pairing in the legacy binding by
- *     phy ORDER: "utmi-1, usb3-1" then "utmi-2, usb3-0".
+ * VBUS/oc-pin left stock (as in j106auv): usb2-2 sits on the always-on
+ * vdd-usb2-5v; forcing vdd-usb1-5v on only logs `port 1 over-current`.
+ * usb3-1 stays disabled (no second XUSB lane; do not flash 0x3090000).
  *
- * Apply everything TWICE. /plugin-manager/fragment-500-xusb-config matches this module SKU
- * unconditionally (ids = ">=3310-1000-500", no odm-data gate) and rewrites the padctl ports
- * and xhci phy list at boot; a static-only patch is silently undone.
- *
- * ODMDATA: LEAVE IT AT STOCK 0x1090000.
- * Auvidea's J120 4.2 release notes give the J10x family (which the J106 is) "1x USB 3.0,
- * config 2 (default port muxing)"; config 6 is the 2x USB3 arrangement for J121/J142/J143.
- * Their shipped p2771-0000.conf.common indeed carries ODMDATA=0x1090000 — i.e. stock. An
- * earlier attempt here used 0x3090000 (taken from the v2.2 J90 BSP); that moves UPHY lane 1
- * from PCIe to XUSB (verified: odm-data loses enable-pcie-on-uphy-lane1, gains
- * enable-xusb-on-uphy-lane1) but is the WRONG carrier's muxing and did not help.
- * To revert:  sudo ./flash.sh -o 0x1090000 -r -k BCT jetson-tx2 mmcblk0p1   (from RCM)
- *
- * STATUS — every software configuration is exhausted, INCLUDING Auvidea's exact shipping
- * config (stock ODMDATA 0x1090000 + this DTB), tested 2026-09-02: still 480 Mb/s on both
- * J2 and J3. The ODMDATA revert demonstrably took effect in hardware — xHCI SS port 3 flips
- * from RxDetect to Disabled, i.e. one XUSB lane instead of two. So the fault is PHYSICAL,
- * below the SoC. See README §7 for the full evidence. In short, with all of the above live:
- *   - padctl dynamic debug shows both SS phys init and power on with the right companions
- *     ("USB3 port 0 companion USB2 port 2 mode 1", "USB3 port 1 companion USB2 port 1"),
- *     and zero errors anywhere in padctl/xhci/dmesg/journal/UART.
- *   - xHCI PORTSC: all three SS ports PP=1, PLS=RxDetect, CCS=0 — powered and polling, but
- *     no far-end receiver termination is ever detected, with a device plugged in.
- *   - Disabling the PCIe controller (it holds 4+1 UPHY lanes from ~1.02 s to ~3.69 s before
- *     "no end points detected") changed nothing — tested, not assumed.
- * So the fault is physical, below the SoC. Leading suspect is the CABLE ROLE: J2/J3 are
- * micro-USB3 sockets used as HOST ports, and a normal micro-B cable is wired for the
- * peripheral end, which puts TX against TX on the SS pairs while USB2 (no role crossover)
- * keeps working. The tech ref calls for a DeLOCK 83469 micro-B -> A-female OTG adapter.
- * Try that before spending more time here.
- *
- * For bulk logging prefer the M110 SATA M.2 slot (J4) instead — lane 5, untouched by any of
- * this, probes clean today, ~270 MB/s vs the USB2 path's ~35. See README.
- *
- * The usb3-std-A-port* pinmux entries under pinctrl@3520000 are deliberately left alone:
- * that node has no driver bound on this image (3520000.pinctrl has no `driver` symlink);
- * the live padctl is 3520000.xusb_padctl (nvidia,tegra18x-xusb-padctl).
+ * Apply twice: fragment-500-xusb-config matches this SKU and rewrites
+ * companions + the xhci phy list at boot.
  */
-&{/xusb_padctl@3520000/ports/usb2-2} {
-	nvidia,oc-pin = <0x01>;
+&{/gpio@2200000/pcie0_lane2_mux} {
+	status = "okay";
 };
 
 &{/xusb_padctl@3520000/ports/usb3-0} {
+	status = "okay";
 	nvidia,usb2-companion = <0x02>;
 };
 
 &{/xusb_padctl@3520000/ports/usb3-1} {
-	status = "okay";
-	nvidia,usb2-companion = <0x01>;
+	status = "disabled";
 };
 
 &{/xhci@3530000} {
 	phys = <&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-0}
 		&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-1}
 		&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-2}
-		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-0}
-		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-1}>;
-	phy-names = "usb2-0", "usb2-1", "usb2-2", "usb3-0", "usb3-1";
+		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-0}>;
+	phy-names = "usb2-0", "usb2-1", "usb2-2", "usb3-0";
 };
 
 &{/plugin-manager/fragment-500-xusb-config/override@0/_overlay_} {
 	phys = <&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-0}
 		&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-1}
 		&{/xusb_padctl@3520000/pads/usb2/lanes/usb2-2}
-		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-0}
-		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-1}>;
-	phy-names = "usb2-0", "usb2-1", "usb2-2", "usb3-0", "usb3-1";
+		&{/xusb_padctl@3520000/pads/usb3/lanes/usb3-0}>;
+	phy-names = "usb2-0", "usb2-1", "usb2-2", "usb3-0";
 };
 
 &{/plugin-manager/fragment-500-xusb-config/override@1/_overlay_/ports/usb3-0} {
+	status = "okay";
 	nvidia,usb2-companion = <0x02>;
 };
 
 &{/plugin-manager/fragment-500-xusb-config/override@1/_overlay_/ports/usb3-1} {
-	status = "okay";
-	nvidia,usb2-companion = <0x01>;
+	status = "disabled";
 };
