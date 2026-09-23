@@ -1457,6 +1457,44 @@ The historical pre-wiring notes follow.
   [`tools/j106-portsc.py`](tools/j106-portsc.py) is what reads that out.
   Do not force `vdd-usb1-5v` on (gpio 413 high → `port 1 over-current`); J3 has 5 V in the stock state.
 
+  *Both sockets at once (verified 2026‑09‑23).* The mux steers only the **SuperSpeed** pairs;
+  J2's D+/D− (`A38/A39` = `usb2-1`) and J3's (`B42/B43` = `usb2-2`) are independent of it and always
+  reach the controller. So the working arrangement is **J3 SuperSpeed + J2 plain USB 2.0 on an
+  ordinary cable** — no rewiring needed on J2, because the crossed SS pairs are simply not connected
+  to anything there. Confirmed live with an SSD at 5000 on J3, a T265 at 480 on J2 and the camtrig on
+  the OTG port simultaneously. **Only one of J2/J3 can be SuperSpeed** (one XUSB lane, one mux):
+  `LABEL j106usb3j2` boots the other choice. Note the `j106-usb3j2.dtb` built on 09‑16 was wrong —
+  it floats the mux correctly but left `nvidia,usb2-companion = <2>` (J3); for J2 it must be `<1>`
+  (`usb2-1`), patched 09‑23 with `fdtput` in both the static padctl node and the
+  `fragment-500-xusb-config` copy. Untested — the SS lane has only ever been proven on J3.
+
+  *Dead end, do not repeat: the VBUS phandles.* `usb2-1` points at `regulator@5` = `vdd-usb1-5v`
+  (GPIO‑gated on gpio 413, and **disabled** at boot with `users=0`), while `usb2-2` points at
+  `regulator@17` = `vdd-usb2-5v` (`regulator-always-on`, no GPIO). That looks exactly like "J2 has no
+  5 V", and it is **not** the explanation: repointing `usb2-1` at `regulator@17` changed nothing, and
+  `vdd-usb2-5v` reads `users=0` even while J3 runs at 5 Gbps on it. These devkit rails do not gate
+  VBUS on this carrier — the load switch is `USB1_EN_OC` (A19), shared by both sockets at 900 mA.
+
+  *The connectors are the weak point — not the electronics.* Both "dead port" scares on 2026‑09‑23
+  were **seating**, on unretained friction‑fit micro‑B sockets. Learn the two signatures:
+
+  | symptom | meaning |
+  |---|---|
+  | `CCS=1`, device detected **full‑speed**, `-71` on every control transfer, `Device not responding to setup address` | **partial** contact — VBUS/GND made, D+/D− marginal, so the high‑speed chirp fails |
+  | `CCS=0` on both the USB2 and SS port of that socket, **zero** kernel events for it | **no** contact — the plug is not home |
+
+  Neither is a port, DTB or cable‑wiring fault, and no amount of software will move them. A mid‑session
+  drop on J3 also cost a `Buffer I/O error … lost sync page write` on a mounted ext4 (`fsck` came back
+  clean, but it is the reason to strain‑relieve both cables before a capture run — 4× IMX296 at 30 fps
+  is ~190 MB/s sustained into that connector for the length of the run).
+
+  *Boot menu (2026‑09‑23).* Superseded USB3 experiment DTBs and their `LABEL`s were removed:
+  `j106usb3`, `j106usb3full`, `j106nopcie`, `j106ss0mux`, plus the unreferenced
+  `tegra186-j106-modes.dtb` / `-usbdev2.dtb`. All are archived in
+  `/home/nvidia/dtb-archive-20260923.tar.gz` on the board together with the pre‑clean
+  `extlinux.conf`. What remains for USB: **`j106usb3j3`** (`DEFAULT`), `j106usb3j2`, and `j106auv`
+  as the pre‑fix rollback.
+
   Historical notes below are the investigation log; they do **not** describe the current DTB.
 
   Previous J120 copy, applied **twice** in [`override-usb.dtsi`](tx2-j106-6csi/override-usb.dtsi)
